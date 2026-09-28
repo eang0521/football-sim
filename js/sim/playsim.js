@@ -733,6 +733,8 @@ export class PlaySim {
   checkBounds() {
     const c = this.carrierAgent();
     if (!c) return;
+    // a scrambling QB who gets past the line is a runner; until then a stop behind it is a sack
+    if (c.role === 'qb' && c.d.runner && !this.isRun && this.kind === 'scrimmage' && c.x > this.los) this.st.qbCrossedLos = true;
     if (c.role === 'qb' && !c.d.runner && this.kind === 'scrimmage') {
       if (c.y < 0 || c.y > FIELD_W) this.whistle('oob', c.x);
       return;
@@ -868,11 +870,24 @@ function buildScrimmageResult(sim, outcome, spotX) {
     const isQB = carrier === sim.qb();
     yds = Math.round(res.spotX - los);
     if (outcome === 'td') { res.td = 'O'; yds = Math.round(100 - los); res.spotX = 100; }
-    if (isQB && !st.scramble && !sim.isRun) {
+    // NFL scoring: on a pass play, a QB downed at or behind the line without throwing is sacked,
+    // even after scrambling, unless he crossed the line of scrimmage first.
+    if (isQB && !sim.isRun && outcome !== 'td' && !st.qbCrossedLos && res.spotX <= los) {
       res.kind = 'sack';
+      let credit = st.tacklers;
+      if (!credit.length) {
+        // pushed out of bounds behind the line: credit the nearest pursuer, else a team sack
+        const near = sim.def.filter((d) => !d.down && Math.hypot(d.x - carrier.x, d.y - carrier.y) < 2.5)
+          .sort((a, b) => Math.hypot(a.x - carrier.x, a.y - carrier.y) - Math.hypot(b.x - carrier.x, b.y - carrier.y));
+        credit = near.slice(0, 1);
+      }
       ev('pass', carrier.p, { sack: 1, sackYds: -yds });
-      for (const t of st.tacklers) ev('def', t.p, { sack: 1 / st.tacklers.length, tfl: 1 });
-      res.desc = `${nm(carrier)} sacked by ${st.tacklers.map(nm).join(' and ')} for ${yds === 0 ? 'no gain' : `${yds} yards`}`;
+      for (const t of credit) ev('def', t.p, { sack: 1 / credit.length, tfl: 1 });
+      const loss = yds === 0 ? 'no gain' : `${yds} yards`;
+      const by = credit.length ? ` by ${credit.map(nm).join(' and ')}` : '';
+      res.desc = st.scramble
+        ? `${nm(carrier)} scrambles and is sacked${by} for ${loss}${outcome === 'oob' ? ' (out of bounds)' : ''}`
+        : `${nm(carrier)} sacked${by} for ${loss}`;
       if (res.spotX <= 0) { res.safety = true; res.desc += ' in the end zone for a SAFETY!'; }
       else res.desc += '.';
       if (st.fumble) res.desc += ` FUMBLE, recovered by ${shortName(st.fumble.rec.p)}.`;
