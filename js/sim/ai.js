@@ -315,7 +315,10 @@ function qbPass(sim, qb) {
     const ev = evaluateTarget(sim, qb, r);
     const smothered = sim.def.some((d) => !d.down && !d.blockers.length && Math.hypot(d.x - r.x, d.y - r.y) < 1.2);
     if (ev && !ev.notReady && !smothered) { P.path = 'screen'; return startThrow(sim, qb, ev); }
-    if (t > S.throwT + 0.6) { if (smothered && ev && !ev.notReady && sim.rng.chance(0.5)) return startThrow(sim, qb, ev); return throwAway(sim, qb); }
+    if (t > S.throwT + 0.6) {
+      if (ev && !ev.notReady && (mustConvert(sim) || (smothered && sim.rng.chance(0.5)))) return startThrow(sim, qb, ev);
+      if (!mustConvert(sim)) return throwAway(sim, qb);
+    }
     return;
   }
   if (t < P.minRead - 0.1 || sim.noThrow) return;
@@ -357,7 +360,7 @@ function qbPass(sim, qb) {
       const air = ev.c.x - los;
       let val = ev.score + noise() + Math.min(air, 15) * 0.03 - Math.max(0, air - 18) * 0.05;
       // on 3rd/4th down a throw that reaches the marker is worth more than a safe checkdown
-      if (sim.ctx?.down >= 3) val += ev.c.x >= toGoX - 0.5 ? 0.22 : -0.12;
+      if (sim.ctx?.down >= 3) val += ev.c.x >= toGoX - 0.5 ? (mustConvert(sim) ? 0.4 : 0.22) : -0.12;
       if (!best || val > best.val) best = { ...ev, val };
     }
     const need = underDuress ? 0.25 : 0.15 - (timeSet - 1.5) * 0.07;
@@ -370,6 +373,11 @@ function qbPass(sim, qb) {
       const scr = hasTrait(qb.p, 'scrambler') ? 2 : hasTrait(qb.p, 'pocket_passer') ? 0.3 : 1;
       if (lane > 0.5 && sim.rng.chance((0.2 + qb.r.spd / 300) * scr)) {
         qb.d.scramble = true; sim.startRun(qb); sim.note('scramble', qb); return;
+      }
+      if (mustConvert(sim)) {
+        // 4th down / 2-pt try: a throwaway is a turnover, so give somebody a chance instead
+        if (best && (underDuress || timeSet > 3.6)) { P.path = 'force'; return startThrow(sim, qb, best); }
+        return; // nobody ready yet: keep the play alive
       }
       if (sim.rng.chance(0.08 + qb.r.awr / 500) || timeSet > 4.5) return throwAway(sim, qb);
       if (best && best.val > -0.1 && sim.rng.chance(0.2)) return startThrow(sim, qb, best); // forced throw
@@ -405,6 +413,9 @@ function startThrow(sim, qb, ev) {
   });
   qb.anim = 'throw'; qb.animT = 0;
 }
+
+// Throwing it away only makes sense when there's another down to play.
+function mustConvert(sim) { return sim.ctx?.down === 4 || !!sim.ctx?.isConversion; }
 
 function throwAway(sim, qb) {
   const P = sim.pass;
