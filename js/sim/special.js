@@ -1,0 +1,544 @@
+// Special teams: kickoffs, punts, field goals and extra points.
+// Frame: kicking team is 'O' and kicks toward +x.
+import { FIELD_W, MID_Y, GRAVITY } from './constants.js';
+import { Picker, makeAgent } from './setup.js';
+import { clamp, norm } from '../util/vec.js';
+import { runnerThink, pursue, escortBlock, goTo, attackDir } from './ai.js';
+
+const shortName = (p) => (p ? `${p.first[0]}.${p.last}` : '?');
+
+export function fgProbability(kicker, dist) {
+  const r = kicker.ratings;
+  const center = 50 + (r.kpw - 70) * 0.32 + (r.kac - 70) * 0.12;
+  const slope = 4.2 + (r.kac - 70) * 0.05;
+  const maxRange = 50 + r.kpw * 0.14;
+  if (dist > maxRange + 2) return 0;
+  return clamp(1 / (1 + Math.exp((dist - center) / slope)), 0, 0.995);
+}
+
+export function setupSpecial(sim, cfg) {
+  if (cfg.kind === 'kickoff') return setupKickoff(sim, cfg);
+  if (cfg.kind === 'punt') return setupPunt(sim, cfg);
+  return setupFG(sim, cfg);
+}
+
+function takeMany(pk, list) { return list.map((pos) => pk.take(pos)); }
+
+// ---------------- Kickoff ----------------
+function setupKickoff(sim, cfg) {
+  const { offTeam: kt, defTeam: rt, los } = cfg;
+  const kp = new Picker(kt), rp = new Picker(rt);
+  // Skip the top starters where sensible: take depth players for coverage
+  const K = kp.take('K');
+  kp.used.add(kp.d.QB[0]?.id);
+  const cov = takeMany(kp, ['LB', 'LB', 'S', 'S', 'CB', 'CB', 'LB', 'WR', 'RB', 'TE']);
+  const off = [];
+  const k = makeAgent(K, 'O', 'K', los - 6, MID_Y);
+  k.special = kickerKO; off.push(k);
+  // Dynamic kickoff (2024+ rules): coverage lines up at the receiving 40 and can't move until the ball lands or is touched.
+  const ys = [4, 9, 14, 19, 23.5, 29.8, 34.3, 39.3, 44.3, 49.3];
+  cov.forEach((p, i) => { const a = makeAgent(p, 'O', 'COV' + i, los + 25, ys[i]); a.special = coverage; a.d.laneY = ys[i]; off.push(a); });
+  // Return team
+  const d = rp.d;
+  const ret1 = [...d.RB, ...d.WR, ...d.CB].sort((a, b) => (b.ratings.spd + b.ratings.btk) - (a.ratings.spd + a.ratings.btk))[0];
+  rp.used.add(ret1.id);
+  const ret2 = rp.take('RB');
+  const blk = takeMany(rp, ['LB', 'LB', 'TE', 'FB', 'LB', 'S', 'TE', 'DE', 'S']);
+  const def = [];
+  const r1 = makeAgent(ret1, 'D', 'KR', los + 62, MID_Y + 4); r1.special = returner; def.push(r1);
+  const r2 = makeAgent(ret2, 'D', 'KR2', los + 60, MID_Y - 5); r2.special = retBlocker; def.push(r2);
+  const bY = [6, 12, 18, 24, 29.5, 35.5, 41.5, 20, 33];
+  blk.forEach((p, i) => { const a = makeAgent(p, 'D', 'RB' + i, los + (i < 7 ? 30.5 : 35), bY[i]); a.special = retBlocker; def.push(a); });
+  sim.off = off; sim.def = def; sim.snapper = k;
+  sim.kr = r1;
+  sim.onSnap = () => {
+    sim.ball.state = 'tee'; sim.ball.holder = null;
+    sim.ball.x = los; sim.ball.y = MID_Y; sim.ball.z = 0.25;
+  };
+  sim.kickBallUpdate = kickBallUpdate;
+  sim.buildResult = kickResult;
+  sim.st.kicker = k;
+}
+
+function kickerKO(sim, a) {
+  if (sim.runner) return sim.runner.side !== a.side ? pursue(sim, a, sim.runner) : null;
+  if (sim.ball.state === 'tee') {
+    goTo(a, sim.los - 0.3, sim.ballY, a.maxSpd * 0.8, false);
+    if (Math.hypot(a.x - sim.los, a.y - sim.ballY) < 0.8) {
+      const kp = a.r.kpw;
+      const dist = 59 + (kp - 75) * 0.3 + sim.rng.normal(0, 4.5);
+      const land = { x: Math.min(sim.los + dist, 108), y: clamp(MID_Y + sim.rng.normal(0, 6), 6, FIELD_W - 6) };
+      launch(sim, a, land, 3.9 + sim.rng.normal(0, 0.2), 'kickoff');
+      a.anim = 'kick'; a.animT = 0;
+    }
+    return;
+  }
+  goTo(a, a.x + 6, a.y, a.maxSpd * 0.6);
+}
+
+function launch(sim, from, land, T, kind, extra = {}) {
+  const B = sim.ball;
+  B.state = 'air'; B.holder = null;
+  B.x = kind === 'kickoff' ? sim.los : from.x + 0.6; B.y = kind === 'kickoff' ? sim.ballY : from.y;
+  B.z = kind === 'kickoff' ? 0.25 : 1.0;
+  B.vx = (land.x - B.x) / T; B.vy = (land.y - B.y) / T;
+  const zEnd = extra.zEnd ?? 0.9;
+  B.vz = (zEnd - B.z + 0.5 * GRAVITY * T * T) / T;
+  B.pass = { kick: true, kind, t0: sim.t, T, land, ...extra };
+  sim.st.kickFrom = from.x; sim.st.land = land;
+  sim.note(kind, from);
+}
+
+function coverage(sim, a) {
+  const B = sim.ball;
+  if (sim.runner && sim.runner.side !== a.side) return pursue(sim, a, sim.runner);
+  if (sim.runner) return escortBlock(sim, a, sim.runner);
+  if (sim.kind === 'kickoff' && !sim.st.kickLive) { goTo(a, a.x, a.y, 0.5); a.faceTo = B; return; }
+  if (B.state === 'tee') { goTo(a, sim.los - 0.8, a.y, 2.5); return; }
+  const land = B.pass?.land || { x: a.x + 20, y: a.y };
+  // lanes converge on the landing spot
+  const ty = a.d.laneY + (land.y - a.d.laneY) * clamp((a.x - sim.los) / (land.x - sim.los), 0, 1) * 0.8;
+  goTo(a, Math.min(land.x - 4, a.x + 10), ty, a.maxSpd, false);
+}
+
+function retBlocker(sim, a) {
+  const c = sim.runner;
+  if (c && c.side === a.side) return escortBlock(sim, a, c);
+  if (c && c.side !== a.side) return pursue(sim, a, c);
+  const B = sim.ball;
+  const land = B.pass?.land;
+  if (!land) { goTo(a, a.x, a.y, 1); return; }
+  if (sim.kind === 'kickoff' && !sim.st.kickLive) { goTo(a, a.x, a.y, 0.5); a.faceTo = B; return; }
+  // set up a wall between coverage and landing spot, facing the coverage team
+  const depth = sim.kind === 'kickoff' ? 14 : 10;
+  goTo(a, Math.min(land.x - depth + (a.slot === 'KR2' ? 6 : 0), a.x + 25), a.y + (land.y - a.y) * 0.3, a.maxSpd * 0.8);
+  a.faceTo = { x: sim.los, y: a.y };
+}
+
+function returner(sim, a) {
+  const B = sim.ball;
+  if (sim.carrierAgent() === a && a.d.runner) return runnerThink(sim, a);
+  if (sim.runner && sim.runner.side !== a.side) return pursue(sim, a, sim.runner);
+  if (sim.runner) return escortBlock(sim, a, sim.runner);
+  const land = B.pass?.land;
+  if (!land || !B.pass?.kick) { goTo(a, a.x, a.y, 1); return; }
+  if (B.pass.letBounce) { goTo(a, land.x - 8, land.y, a.maxSpd * 0.6); a.faceTo = B; return; }
+  goTo(a, land.x + 0.2, land.y, a.maxSpd, true);
+  a.faceTo = B;
+}
+
+function kickBallUpdate(B, P) {
+  const sim = this;
+  const t = sim.t;
+  if (P.kind === 'fg' || P.kind === 'xp') {
+    if (B.x >= 110 || B.z <= 0.1 || t > P.t0 + P.T + 0.4) {
+      if (!sim.st.fgDone) {
+        sim.st.fgDone = true;
+        sim.whistle(P.good ? 'fg_good' : 'fg_miss', sim.los);
+        B.state = 'dead-air';
+      }
+    }
+    return;
+  }
+  // Out of bounds in flight (low)
+  if ((B.y < 0 || B.y > FIELD_W) && B.z < 1.5) return sim.whistle('oob', B.x);
+  const ret = sim.kr;
+  if (!P.letBounce && ret && !ret.down && t > P.t0 + P.T * 0.6 && B.z < 2.7) {
+    if (Math.hypot(ret.x - B.x, ret.y - B.y) < 1.3) {
+      if (sim.rng.chance(0.012 + (100 - ret.r.cth) / 100 * 0.02)) {
+        // muff: ball falls, return team recovers most of the time
+        B.vx *= 0.2; B.vy *= 0.2; B.vz = 1.5; sim.st.muff = true;
+        P.letBounce = true;
+        return;
+      }
+      B.state = 'held'; B.holder = ret; B.pass = null;
+      sim.st.catchX = ret.x; sim.st.kickLive = true;
+      if (P.fairCatch) return sim.whistle('fair_catch', ret.x);
+      if (P.kind === 'kickoff' && ret.x > 100 && (ret.x > 103 || sim.rng.chance(0.6))) return sim.whistle('touchback', ret.x);
+      ret.vx = -2; ret.vy = 0;
+      sim.startRun(ret);
+      sim.note('return', ret);
+      return;
+    }
+  }
+  if (B.z <= 0.12) {
+    sim.st.kickLive = true;
+    // hit the ground
+    if (P.kind === 'kickoff') {
+      if (B.x >= 100) return sim.whistle('touchback', B.x);
+      // nearest returner scoops it
+      const r = sim.def.slice().sort((p, q) => Math.hypot(p.x - B.x, p.y - B.y) - Math.hypot(q.x - B.x, q.y - B.y))[0];
+      B.state = 'held'; B.holder = r; B.pass = null; sim.kr = r;
+      r.special = returner;
+      sim.startRun(r);
+      return;
+    }
+    // punt: bounce and roll
+    if (B.x >= 100) return sim.whistle('touchback', B.x);
+    B.state = 'roll';
+    const rollSpd = Math.max(0, sim.rng.normal(4.5, 3));
+    const u = norm(B.vx, B.vy);
+    B.vx = u.x * rollSpd + sim.rng.normal(0, 1); B.vy = u.y * rollSpd * 0.6 + sim.rng.normal(0, 1.5); B.vz = 0; B.z = 0.12;
+    B.rollT = 0;
+  }
+}
+
+export function rollUpdate(sim, dt) {
+  const B = sim.ball;
+  B.rollT += dt;
+  B.vx *= 1 - 1.4 * dt; B.vy *= 1 - 1.4 * dt;
+  B.x += B.vx * dt; B.y += B.vy * dt;
+  B.rot += dt * Math.hypot(B.vx, B.vy) * 3;
+  B.z = 0.12 + Math.abs(Math.sin(B.rollT * 6)) * Math.min(0.5, Math.hypot(B.vx, B.vy) * 0.08);
+  if (B.x >= 100) return sim.whistle('touchback', B.x);
+  if (B.y < 0 || B.y > FIELD_W) return sim.whistle('oob', B.x);
+  const sp = Math.hypot(B.vx, B.vy);
+  // a coverage player touching it downs it
+  const toucher = sim.off.find((a) => !a.down && Math.hypot(a.x - B.x, a.y - B.y) < 1.0);
+  if (sp < 0.3 || toucher || B.rollT > 3) sim.whistle('downed', B.x);
+}
+
+function kickResult(outcome, spotX) {
+  const sim = this;
+  const st = sim.st;
+  const res = {
+    kind: 'kickoff', outcome, spotX, possession: 'D', td: null, safety: false, touchback: false,
+    elapsed: sim.t, clockStops: true, events: [], desc: '', turnover: false, oob: outcome === 'oob',
+    tacklers: (st.tacklers || []).map((a) => a.p),
+  };
+  const k = st.kicker;
+  const kdist = Math.round((st.land?.x ?? spotX) - sim.los);
+  const ret = sim.kr;
+  const nm = (a) => shortName(a?.p);
+  res.events.push({ type: 'kick', pid: k.p.id, ko: 1, tb: outcome === 'touchback' ? 1 : 0 });
+  if (outcome === 'touchback') {
+    res.touchback = true; res.spotX = 65;
+    res.desc = `${nm(k)} kicks ${kdist} yards. Touchback.`;
+    return res;
+  }
+  if (outcome === 'oob' && !st.catchX) {
+    res.spotX = 60;
+    res.desc = `${nm(k)} kicks out of bounds. Ball placed at the 40.`;
+    return res;
+  }
+  const retYds = Math.round((st.catchX ?? spotX) - spotX);
+  res.events.push({ type: 'ret', pid: ret.p.id, kr: 1, yds: retYds, td: outcome === 'td' ? 1 : 0 });
+  res.desc = `${nm(k)} kicks ${kdist} yards, ${nm(ret)} returns ${retYds} yards`;
+  if (outcome === 'td') { res.td = 'D'; res.spotX = 0; res.desc += ' for a TOUCHDOWN!'; return res; }
+  if (spotX >= 100 && !st.fumble) { res.touchback = true; res.spotX = 80; res.desc += ', downed in the end zone. Touchback.'; return res; }
+  finishTackle(sim, res, st);
+  return res;
+}
+
+function finishTackle(sim, res, st) {
+  const nm = (a) => shortName(a?.p);
+  if (res.outcome === 'oob') res.desc += ' (out of bounds).';
+  else if (st.tacklers?.length) {
+    res.desc += ` (${st.tacklers.map(nm).join(', ')}).`;
+    st.tacklers.forEach((t, i) => res.events.push({ type: 'def', pid: t.p.id, ...(i === 0 ? { tkl: 1 } : { ast: 1 }) }));
+  } else res.desc += '.';
+  if (st.fumble) {
+    const f = st.fumble;
+    res.events.push({ type: 'fum', pid: f.by.p.id, fum: 1, lost: f.lost ? 1 : 0 });
+    if (f.lost) {
+      res.possession = 'O'; res.turnover = true;
+      res.desc += ` FUMBLE! Recovered by ${nm(f.rec)}.`;
+    } else res.desc += ` Fumble, recovered by ${nm(f.rec)}.`;
+  }
+}
+
+// ---------------- Punt ----------------
+function setupPunt(sim, cfg) {
+  const { offTeam: kt, defTeam: rt, los, ballY } = cfg;
+  const kp = new Picker(kt), rp = new Picker(rt);
+  const P = kp.take('P');
+  const line = takeMany(kp, ['OL', 'OL', 'OL', 'OL', 'OL']);
+  const wings = takeMany(kp, ['TE', 'TE']);
+  const pp = kp.take('FB');
+  const gun = takeMany(kp, ['CB', 'WR']);
+  const off = [];
+  const lineY = [0, 1.3, -1.3, 2.6, -2.6];
+  line.forEach((p, i) => {
+    const a = makeAgent(p, 'O', i === 0 ? 'LS' : 'PL' + i, los - 0.6, ballY + lineY[i]);
+    a.special = puntProtect; off.push(a);
+  });
+  wings.forEach((p, i) => { const a = makeAgent(p, 'O', 'W' + i, los - 1.5, ballY + (i ? -3.6 : 3.6)); a.special = puntProtect; off.push(a); });
+  const ppA = makeAgent(pp, 'O', 'PP', los - 5, ballY + 0.8); ppA.special = puntProtect; off.push(ppA);
+  gun.forEach((p, i) => { const a = makeAgent(p, 'O', 'G' + i, los - 0.8, i ? 3.5 : FIELD_W - 3.5); a.special = gunner; off.push(a); });
+  const pA = makeAgent(P, 'O', 'P', los - 14, ballY); pA.special = punter; off.push(pA);
+  // return team
+  const d = rp.d;
+  const ret1 = [...d.WR, ...d.CB, ...d.RB].sort((a, b) => (b.ratings.spd + b.ratings.btk + b.ratings.cth) - (a.ratings.spd + a.ratings.btk + a.ratings.cth))[0];
+  rp.used.add(ret1.id);
+  const rush = takeMany(rp, ['DE', 'DT', 'LB', 'LB', 'DE', 'LB']);
+  const jam = takeMany(rp, ['CB', 'CB']);
+  const back = takeMany(rp, ['S', 'S']);
+  const def = [];
+  const rY = [3.2, 1.3, -0.7, -2.2, -3.8, 5.5];
+  rush.forEach((p, i) => { const a = makeAgent(p, 'D', 'PR' + i, los + 0.9, ballY + rY[i]); a.special = puntRush; def.push(a); });
+  jam.forEach((p, i) => {
+    const a = makeAgent(p, 'D', 'J' + i, los + 1.2, i ? 3.5 : FIELD_W - 3.5);
+    a.special = jammer; a.d.gunner = off.find((o) => o.slot === 'G' + i); def.push(a);
+  });
+  back.forEach((p, i) => { const a = makeAgent(p, 'D', 'B' + i, los + 9, ballY + (i ? -6 : 6)); a.special = retBlocker; def.push(a); });
+  const puntSpot = los - 14;
+  const r1 = makeAgent(ret1, 'D', 'PRET', clamp(los + 44 + (P.ratings.kpw - 75) * 0.3, 0, 103), MID_Y);
+  r1.special = returner; def.push(r1);
+  sim.off = off; sim.def = def; sim.snapper = off[0]; sim.kr = r1;
+  sim.st.kicker = pA;
+  sim.onSnap = () => {
+    sim.throwBall(sim.snapper, pA, { c: { x: pA.x, y: pA.y }, T: 0.75, snap: true });
+    sim.ball.z = 0.4;
+  };
+  sim.kickBallUpdate = kickBallUpdate;
+  sim.buildResult = puntResult;
+}
+
+function punter(sim, a) {
+  const B = sim.ball;
+  if (sim.runner && sim.runner.side !== a.side) return pursue(sim, a, sim.runner);
+  if (B.state === 'held' && B.holder === a && !sim.st.punted) {
+    goTo(a, a.x + 0.8, a.y, 1.5);
+    if (!a.d.caughtT) a.d.caughtT = sim.t;
+    if (sim.t - a.d.caughtT > 1.15) {
+      sim.st.punted = true;
+      const r = a.r;
+      // gross distance measured from the line of scrimmage
+      let gross = 46 + (r.kpw - 75) * 0.35 + sim.rng.normal(0, 5);
+      const toGoal = 100 - sim.los;
+      // pin it inside the 10 when the field is short
+      if (toGoal < 58) gross = Math.min(gross, toGoal - 6 - (r.kac / 100) * 3 + sim.rng.normal(0, 3.5));
+      const land = { x: Math.min(sim.los + gross, 115), y: clamp(MID_Y + sim.rng.normal(0, 7), 4, FIELD_W - 4) };
+      const hang = clamp(4.2 + (r.kpw - 75) * 0.02 + sim.rng.normal(0, 0.3), 3.3, 5.2) * (gross < 38 ? 0.85 : 1);
+      const extra = {};
+      if (land.x >= 92 && land.x < 100) extra.letBounce = true;
+      if (land.x >= 100) extra.letBounce = true;
+      launch(sim, a, land, hang, 'punt', extra);
+      a.anim = 'kick'; a.animT = 0;
+      // fair catch decision made when the ball is kicked, based on projected coverage
+      const ret = sim.kr;
+      const gunners = sim.off.filter((o) => o.slot.startsWith('G'));
+      const soonest = Math.min(...gunners.map((g) => Math.max(0, Math.hypot(g.x - land.x, g.y - land.y) - 3) / g.maxSpd));
+      if (!extra.letBounce && soonest < hang + 0.9 && sim.rng.chance(0.6 + (100 - ret.r.awr) / 300)) B.pass.fairCatch = true;
+    }
+    return;
+  }
+  goTo(a, a.x + 3, a.y, 3);
+}
+
+function puntProtect(sim, a) {
+  const c = sim.runner;
+  if (c && c.side !== a.side) return pursue(sim, a, c);
+  if (sim.ball.state === 'air' && sim.ball.pass?.kick) {
+    // release into coverage
+    if (a.engaged) sim.release(a);
+    a.d.blockOn = null;
+    const land = sim.ball.pass.land;
+    goTo(a, land.x - 5, land.y + (a.y - sim.ballY) * 1.5, a.maxSpd, false);
+    return;
+  }
+  const p = sim.off.find((o) => o.slot === 'P');
+  let best = null, bd = 5;
+  for (const d of sim.def) {
+    if (d.down || d.special !== puntRush) continue;
+    const dd = Math.hypot(d.x - a.x, d.y - a.y);
+    if (dd < bd && d.blockers.length < 1) { bd = dd; best = d; }
+  }
+  if (a.engaged) return;
+  if (best) {
+    a.d.blockOn = best; a.d.protect = p;
+    const u = norm(p.x - best.x, p.y - best.y);
+    goTo(a, best.x + u.x * 0.9, best.y + u.y * 0.9, a.maxSpd, false);
+  } else goTo(a, a.x - 0.5, a.y, 2);
+}
+
+function gunner(sim, a) {
+  const c = sim.runner;
+  if (c && c.side !== a.side) return pursue(sim, a, c);
+  if (sim.phase !== 'live') return;
+  const land = sim.ball.pass?.land || sim.st.land;
+  const tx = land ? land.x - 1.5 : a.x + 20;
+  const ty = land ? land.y + Math.sign(a.y - MID_Y) * 2 : a.y;
+  goTo(a, tx, a.x < tx - 15 ? a.y + (ty - a.y) * 0.15 : ty, a.maxSpd, !!land);
+  if (land && sim.ball.state === 'roll') goTo(a, sim.ball.x, sim.ball.y, a.maxSpd, false);
+}
+
+function jammer(sim, a) {
+  const c = sim.runner;
+  if (c && c.side === a.side) return escortBlock(sim, a, c);
+  if (c && c.side !== a.side) return pursue(sim, a, c);
+  const g = a.d.gunner;
+  if (!g) return;
+  a.d.blockOn = g; a.d.protect = sim.kr;
+  const u = norm(sim.kr.x - g.x, sim.kr.y - g.y);
+  goTo(a, g.x + u.x * 0.9, g.y + u.y * 0.9, a.maxSpd, false);
+}
+
+function puntRush(sim, a) {
+  const c = sim.runner;
+  if (c && c.side === a.side) return escortBlock(sim, a, c);
+  if (c && c.side !== a.side) return pursue(sim, a, c);
+  const B = sim.ball;
+  if (B.state === 'air' && B.pass?.kick) {
+    // peel back to set up the return
+    const land = B.pass.land;
+    goTo(a, land.x - 14, a.y + (land.y - a.y) * 0.4, a.maxSpd * 0.85);
+    return;
+  }
+  const p = sim.off.find((o) => o.slot === 'P');
+  if (sim.t > 1.4 && a.slot !== 'PR2') { goTo(a, a.x + 3, a.y, 3); return; }
+  goTo(a, p.x, p.y, a.maxSpd, false);
+}
+
+function puntResult(outcome, spotX) {
+  const sim = this;
+  const st = sim.st;
+  const res = {
+    kind: 'punt', outcome, spotX, possession: 'D', td: null, safety: false, touchback: false,
+    elapsed: sim.t, clockStops: true, events: [], desc: '', turnover: false, oob: outcome === 'oob',
+    tacklers: (st.tacklers || []).map((a) => a.p),
+  };
+  const P = st.kicker;
+  const nm = (a) => shortName(a?.p);
+  if (!st.punted) {
+    // snap trouble: punter tackled with the ball
+    res.possession = 'D'; res.turnover = true;
+    res.desc = `Punt is blocked/botched! ${nm(P)} is swarmed.`;
+    res.spotX = Math.min(spotX, sim.los);
+    return res;
+  }
+  let gross = Math.round((outcome === 'touchback' ? 100 : (st.catchX ?? spotX)) - sim.los);
+  if (outcome === 'touchback') {
+    res.touchback = true; res.spotX = 80;
+    res.events.push({ type: 'punt', pid: P.p.id, punts: 1, yds: gross, tb: 1 });
+    res.desc = `${nm(P)} punts ${gross} yards into the end zone. Touchback.`;
+    return res;
+  }
+  if (outcome === 'downed' || (outcome === 'oob' && !st.catchX)) {
+    gross = Math.round(spotX - sim.los);
+    res.events.push({ type: 'punt', pid: P.p.id, punts: 1, yds: gross, in20: spotX >= 80 ? 1 : 0 });
+    res.desc = `${nm(P)} punts ${gross} yards, ${outcome === 'oob' ? 'out of bounds' : 'downed'}.`;
+    return res;
+  }
+  res.events.push({ type: 'punt', pid: P.p.id, punts: 1, yds: gross, in20: spotX >= 80 ? 1 : 0 });
+  const ret = sim.kr;
+  if (outcome === 'fair_catch') {
+    res.desc = `${nm(P)} punts ${gross} yards, fair catch by ${nm(ret)}.`;
+    res.events.push({ type: 'ret', pid: ret.p.id, pr: 1, yds: 0, fc: 1 });
+    return res;
+  }
+  const retYds = Math.round((st.catchX ?? spotX) - spotX);
+  res.events.push({ type: 'ret', pid: ret.p.id, pr: 1, yds: retYds, td: outcome === 'td' ? 1 : 0 });
+  res.desc = `${nm(P)} punts ${gross} yards, ${nm(ret)} returns ${retYds} yards`;
+  if (outcome === 'td') { res.td = 'D'; res.spotX = 0; res.desc += ' for a TOUCHDOWN!'; return res; }
+  finishTackle(sim, res, st);
+  return res;
+}
+
+function yardLine(ballOn) {
+  const b = Math.round(ballOn);
+  return b <= 50 ? `own ${b}` : `opp ${100 - b}`;
+}
+
+// ---------------- Field goal / PAT ----------------
+function setupFG(sim, cfg) {
+  const { offTeam: kt, defTeam: rt, los, ballY } = cfg;
+  const kp = new Picker(kt), rp = new Picker(rt);
+  const K = kp.take('K');
+  const H = kp.take('P');
+  const line = takeMany(kp, ['OL', 'OL', 'OL', 'OL', 'OL', 'TE', 'TE', 'TE', 'OL']);
+  const off = [];
+  const lineY = [0, 1.3, -1.3, 2.6, -2.6, 3.9, -3.9, 5.0, -5.0];
+  line.forEach((p, i) => {
+    const a = makeAgent(p, 'O', i === 0 ? 'LS' : 'FL' + i, los - (i < 7 ? 0.6 : 1.4), ballY + lineY[i]);
+    a.special = fgProtect; off.push(a);
+  });
+  const hA = makeAgent(H, 'O', 'H', los - 7, ballY); hA.special = holder; off.push(hA);
+  const kA = makeAgent(K, 'O', 'K', los - 9.5, ballY + 1.8); kA.special = fgKicker; off.push(kA);
+  const rush = takeMany(rp, ['DE', 'DT', 'DT', 'DE', 'DT', 'DE', 'LB', 'LB', 'LB', 'S', 'CB']);
+  const def = [];
+  const rY = [0.7, -0.7, 2.0, -2.0, 3.3, -3.3, 4.6, -4.6, 6.2, 0, -6.2];
+  rush.forEach((p, i) => {
+    const a = makeAgent(p, 'D', 'FR' + i, los + (i < 9 ? 0.9 : 7), ballY + rY[i]);
+    a.special = fgRush; def.push(a);
+  });
+  sim.off = off; sim.def = def; sim.snapper = off[0];
+  sim.st.kicker = kA; sim.st.holder = hA;
+  const dist = Math.round(100 - los + 17);
+  sim.st.fgDist = dist;
+  sim.onSnap = () => {
+    sim.throwBall(sim.snapper, hA, { c: { x: hA.x, y: hA.y }, T: 0.45, snap: true });
+    sim.ball.z = 0.4;
+  };
+  sim.kickBallUpdate = kickBallUpdate;
+  sim.buildResult = fgResult;
+}
+
+function holder(sim, a) {
+  goTo(a, a.x, a.y, 0.5);
+  if (sim.ball.holder === a) { a.anim = 'kneel'; sim.ball.z = 0.35; }
+}
+function fgKicker(sim, a) {
+  const B = sim.ball;
+  const h = sim.st.holder;
+  if (sim.st.kicked) { goTo(a, a.x + 1, a.y, 1.5); return; }
+  if (B.holder === h && sim.t > 0.75) {
+    goTo(a, h.x - 0.6, h.y + 0.4, 5, false);
+    if (Math.hypot(a.x - (h.x - 0.6), a.y - (h.y + 0.4)) < 0.4 || sim.t > 1.6) {
+      sim.st.kicked = true;
+      const p = fgProbability(a.p, sim.st.fgDist);
+      const good = sim.rng.chance(p);
+      const kx = h.x;
+      const T = (110 - kx) / 22;
+      let y = MID_Y + sim.rng.normal(0, 1);
+      let zEnd = 5 + sim.rng.range(0, 4);
+      if (good) y = MID_Y + clamp(sim.rng.normal(0, 1.1), -2.6, 2.6);
+      else {
+        const range = 50 + a.r.kpw * 0.14;
+        if (sim.st.fgDist > range - 3 && sim.rng.chance(0.6)) { zEnd = 1.5; sim.st.short = true; }
+        else { y = MID_Y + (sim.rng.chance(0.5) ? 1 : -1) * sim.rng.range(3.5, 6); sim.st.wide = y > MID_Y ? 'left' : 'right'; }
+      }
+      launch(sim, h, { x: 110, y }, T, sim.kind === 'xp' ? 'xp' : 'fg', { good, zEnd });
+      sim.ball.x = h.x; sim.ball.z = 0.35;
+      a.anim = 'kick'; a.animT = 0;
+    }
+    return;
+  }
+  goTo(a, a.x, a.y, 0.5);
+}
+function fgProtect(sim, a) {
+  if (a.engaged) return;
+  let best = null, bd = 3;
+  for (const d of sim.def) {
+    const dd = Math.hypot(d.x - a.x, d.y - a.y);
+    if (dd < bd && d.blockers.length < 1) { bd = dd; best = d; }
+  }
+  if (best) { a.d.blockOn = best; a.d.protect = sim.st.holder; goTo(a, best.x - 0.8, best.y, 3, false); }
+  else goTo(a, a.x, a.y, 1);
+}
+function fgRush(sim, a) {
+  const h = sim.st.holder;
+  if (sim.phase !== 'live') return;
+  goTo(a, h.x, h.y, a.maxSpd, false);
+}
+
+function fgResult(outcome) {
+  const sim = this;
+  const st = sim.st;
+  const K = st.kicker;
+  const xp = sim.kind === 'xp';
+  const good = outcome === 'fg_good';
+  const res = {
+    kind: xp ? 'xp' : 'fg', outcome, spotX: sim.los, possession: 'O', td: null, safety: false, touchback: false,
+    elapsed: sim.t, clockStops: true, events: [], desc: '', turnover: false, good, dist: st.fgDist, tacklers: [],
+  };
+  const nm = shortName(K.p);
+  if (xp) {
+    res.events.push({ type: 'kick', pid: K.p.id, xpa: 1, xpm: good ? 1 : 0 });
+    res.desc = good ? `${nm} extra point is GOOD.` : `${nm} extra point is NO GOOD${st.wide ? ` (wide ${st.wide})` : ''}.`;
+  } else {
+    res.events.push({ type: 'kick', pid: K.p.id, fga: 1, fgm: good ? 1 : 0, long: good ? st.fgDist : 0 });
+    res.desc = `${nm} ${st.fgDist}-yard field goal is ${good ? 'GOOD' : `NO GOOD${st.short ? ' (short)' : st.wide ? ` (wide ${st.wide})` : ''}`}.`;
+  }
+  return res;
+}

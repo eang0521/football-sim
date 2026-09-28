@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Gridiron Sim</title>
+  <meta name="description" content="A 3D 11-on-11 American football simulation with AI play-calling, QB progressions, zone/man coverage and full box scores." />
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><ellipse cx='50' cy='50' rx='44' ry='28' fill='%237a3b12' transform='rotate(-30 50 50)'/><path d='M34 50h32M40 44v12M47 44v12M54 44v12M61 44v12' stroke='white' stroke-width='4' transform='rotate(-30 50 50)'/></svg>" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <div id="app">
+    <canvas id="view"></canvas>
+    <div id="labels"></div>
+
+    <header id="scorebug" class="hidden">
+      <div class="sb-team" id="sb-away">
+        <span class="sb-abbr"></span><span class="sb-to"></span><span class="sb-score"></span><span class="sb-poss" title="Possession"></span>
+      </div>
+      <div class="sb-team" id="sb-home">
+        <span class="sb-abbr"></span><span class="sb-to"></span><span class="sb-score"></span><span class="sb-poss" title="Possession"></span>
+      </div>
+      <div class="sb-clock"><span id="sb-q"></span><span id="sb-time"></span></div>
+      <div class="sb-down" id="sb-down"></div>
+    </header>
+
+    <div id="banner" class="hidden">
+      <div id="banner-top"></div>
+      <div id="banner-sub"></div>
+    </div>
+
+    <aside id="pbp" class="panel">
+      <div class="panel-head">
+        <span>Play-by-Play</span>
+        <button class="icon-btn" id="pbp-toggle" title="Collapse panel">&#x2039;</button>
+      </div>
+      <div id="pbp-list"></div>
+    </aside>
+
+    <nav id="controls">
+      <div class="group">
+        <button id="btn-play" class="primary" title="Play / Pause (Space)">&#10074;&#10074;</button>
+        <select id="speed" title="Playback speed">
+          <option value="0.25">0.25×</option>
+          <option value="0.5">0.5×</option>
+          <option value="1" selected>1×</option>
+          <option value="2">2×</option>
+          <option value="4">4×</option>
+        </select>
+        <button id="btn-next" title="Skip to next play (N)">Next play</button>
+        <button id="btn-simq" title="Simulate to end of the quarter">Sim quarter</button>
+        <button id="btn-simg" title="Simulate the rest of the game">Sim game</button>
+      </div>
+      <div class="group" id="cams">
+        <button data-cam="broadcast" class="on" title="Broadcast (1)">TV</button>
+        <button data-cam="high" title="All-22 (2)">All-22</button>
+        <button data-cam="endzone" title="Behind the offense (3)">QB view</button>
+        <button data-cam="follow" title="Follow the ball (4)">Follow</button>
+        <button data-cam="sky" title="Overhead (5)">Sky</button>
+        <button data-cam="free" title="Free orbit: drag to rotate, scroll to zoom (6)">Free</button>
+      </div>
+      <div class="group">
+        <label class="tog"><input type="checkbox" id="tog-art" checked /> Play art</label>
+        <label class="tog"><input type="checkbox" id="tog-names" /> Names</label>
+        <label class="tog"><input type="checkbox" id="tog-auto" checked /> Auto-advance</label>
+      </div>
+      <div class="group">
+        <button id="btn-box">Box score</button>
+        <button id="btn-teams">Teams</button>
+        <button id="btn-new" class="primary">New game</button>
+      </div>
+    </nav>
+
+    <div id="toast" class="hidden"></div>
+  </div>
+
+  <!-- New game -->
+  <div class="modal hidden" id="modal-new">
+    <div class="modal-card">
+      <h2>New Game</h2>
+      <div class="matchup">
+        <div class="pick">
+          <label>Away</label>
+          <select id="ng-away"></select>
+          <div class="team-card" id="ng-away-card"></div>
+        </div>
+        <div class="at">@</div>
+        <div class="pick">
+          <label>Home</label>
+          <select id="ng-home"></select>
+          <div class="team-card" id="ng-home-card"></div>
+        </div>
+      </div>
+      <div class="row">
+        <label>Quarter length
+          <select id="ng-qlen">
+            <option value="300">5 min</option>
+            <option value="480">8 min</option>
+            <option value="600">10 min</option>
+            <option value="900" selected>15 min (full)</option>
+          </select>
+        </label>
+        <label>Seed <input id="ng-seed" type="number" placeholder="random" /></label>
+      </div>
+      <div class="actions">
+        <button id="ng-cancel">Cancel</button>
+        <button id="ng-start" class="primary">Kick off</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Box score -->
+  <div class="modal hidden" id="modal-box">
+    <div class="modal-card wide">
+      <div class="modal-head"><h2>Box Score</h2><button class="icon-btn close" data-close="modal-box">&times;</button></div>
+      <div id="box-body"></div>
+    </div>
+  </div>
+
+  <!-- Team editor -->
+  <div class="modal hidden" id="modal-teams">
+    <div class="modal-card wide">
+      <div class="modal-head"><h2>Teams &amp; Rosters</h2><button class="icon-btn close" data-close="modal-teams">&times;</button></div>
+      <div id="teams-body"></div>
+    </div>
+  </div>
+
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>

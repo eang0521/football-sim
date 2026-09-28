@@ -1,0 +1,9 @@
+{
+  "name": "gridiron-sim",
+  "private": true,
+  "type": "module",
+  "description": "Static 3D football simulation (Three.js). No build step; package.json only enables ES modules for the Node test harness.",
+  "scripts": {
+    "sim": "node tools/headless.mjs"
+  }
+}

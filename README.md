@@ -1,0 +1,95 @@
+# Gridiron Sim
+
+A 3D, 11-on-11 American football simulation that runs entirely in the browser: no build step and no server, just static files that deploy to GitHub Pages.
+
+Pick two teams and watch the game play itself. Each snap, both coaching AIs call a play. Then all 22 players run the play with their own movement physics:
+
+- The QB drops back, reads his progression, and feels pressure.
+- Receivers run the route tree.
+- Linemen engage, drive, and shed.
+- Defenders play man or zone, read run vs. pass, pursue, and tackle.
+
+Every play feeds a full box score and a play-by-play log.
+
+## Running locally
+
+ES modules require an HTTP server; opening `index.html` from `file://` won't work. Any static server will do:
+
+```bash
+python -m http.server 8765
+```
+
+Then open http://localhost:8765.
+
+Three.js is loaded from the jsDelivr CDN through an import map, so there is nothing to install.
+
+## Deploying to GitHub Pages
+
+1. Push this folder to a GitHub repository.
+2. In the repo, go to **Settings → Pages** and set **Source** to "Deploy from a branch".
+3. Pick your branch and the `/ (root)` folder, then save.
+
+The site will be served at `https://<user>.github.io/<repo>/`. All paths are relative, so it works from a project subpath. `.nojekyll` is included so Pages serves the files as-is.
+
+## Controls
+
+| Control | Action |
+| --- | --- |
+| **Space** | Pause / resume |
+| **N** / **Next play** | Finish the current play instantly (or start the next one) |
+| **Sim quarter / Sim game** | Simulate ahead instantly, then resume live play |
+| **1–6** | Cameras: TV, All-22, QB view, Follow, Sky, Free orbit (drag and scroll) |
+| Speed menu | 0.25× to 4× playback |
+| Play art | Pre-snap routes, run aiming point, zone landmarks, man matchups, blitzers |
+| Names | Floating jersey numbers and names |
+| Auto-advance | Off = pause after every play |
+| **Teams** | Edit teams, colors, coach tendencies, and every player's ratings (saved in your browser) |
+
+## How it works
+
+```
+js/
+  main.js            app wiring: game loop, controls, modals
+  sim/               pure JS, no DOM: runs identically in Node for testing
+    game.js          rules engine: clock, downs, scoring, 4th-down/2-pt/kneel/timeout logic, OT, stats
+    playcaller.js    offensive and defensive play-calling AI
+    playbook.js      formations, route tree, pass concepts, run schemes, fronts and coverages
+    setup.js         personnel, alignment, and assignments (blocking, man matchups, zone drops)
+    ai.js            per-player decision making (QB, receivers, blockers, runner, rush, coverage, pursuit)
+    playsim.js       60 Hz physics: steering, blocking engagement, ball flight, catches, tackles, fumbles
+    special.js       kickoffs (2024+ dynamic format), punts, field goals, PATs
+    stats.js         box-score accumulation
+  render/            Three.js stadium, field texture, player rigs, cameras
+  ui/                scorebug, play-by-play, box score, team editor
+  data/              fictional league generation and localStorage persistence
+tools/               Node harnesses for tuning realism
+```
+
+### Simulation highlights
+
+- **Movement physics.** Each player has a top speed, acceleration, and agility derived from ratings. Players steer with separate forward, braking, and lateral acceleration limits. Facing matters: backpedaling and shuffling are slower, and hard cuts cost speed.
+- **Blocking.** Blocks engage on contact. Rating-weighted forces push each pair. In pass protection, blockers can only absorb and give ground, so the pocket compresses. In the run game they drive defenders. Sheds, double teams, pancakes, and whiffed open-field blocks are all modeled.
+- **QB.** Drop depth depends on the concept, with play-action fakes. The QB reads the progression in order and holds on a primary read until it breaks. He judges each window by predicting where the receiver will be and how fast each defender can get there, allowing for which way the defender is moving. Awareness adds read noise. He feels pressure by time-to-contact and chooses to throw it away, scramble, force a throw, or take the sack.
+- **Ball flight.** Passes are real projectiles with lead, loft for deep balls, and arm-strength limits. Accuracy error runs mostly along the throw line, which produces over- and under-throws. Catches resolve at the ball's closest approach and are contested by nearby defenders, leading to breakups, tips, drops, and interceptions.
+- **Coverage.**
+  - *Man:* cushion that shrinks through the route, trail or on-top technique depending on safety help, and reaction lag that depends on the defender's skill versus the receiver's route running.
+  - *Zone:* drops to landmarks (flats, hooks, curl-flat, thirds, halves, quarters) and matches threats. Deep defenders turn and run on vertical routes. Everyone reacts to the QB's eyes and breaks on the throw.
+- **Runner vision.** The runner evaluates headings by how far he can get before a defender could intercept, with reaction time based on awareness. Jukes, broken tackles, and cutbacks emerge from this.
+- **Tackling.** Pursuit uses analytic intercept angles with outside contain. Arm tackles at the edge of reach, gang tackles, momentum, diving tackles, forward progress, and fumbles are all modeled.
+- **Game management.** Clock rules include runoff by tempo and out of bounds late in halves, the two-minute warning, timeouts, hurry-up, and kneel-downs. Also modeled: 4th-down and field goal decisions from kicker range and coach aggression, a 2-point chart, and the 2025 overtime rules.
+
+### Realism checks
+
+`node tools/headless.mjs 24` simulates 24 full games and prints league averages next to NFL norms. At the time of writing it produces about 25 points, 63 plays, 7.5 yards per attempt, and a 58–64% completion rate per team-game, with realistic punt, turnover, and field goal rates. Sacks (about 1 per game vs. the NFL's 2.3) and third-down conversion (about 32–38% vs. 39%) still run a little low. Other harnesses:
+
+- `tools/playstats.mjs [run|pass] N`: outcome distributions per play and coverage
+- `tools/passdiag.mjs N`: throw timing, air yards vs YAC, completion by depth
+- `tools/rushdiag.mjs`: pressure and sack timing when the QB never throws
+- `tools/openfield.mjs depth lateral`: one-on-one open-field tackling
+- `tools/trace.mjs <play> <coverage> <seed> [-a]`: a single play, including an ASCII field view
+
+## Customizing
+
+- **Teams and players:** use the in-app editor, or export, edit, and import the league as JSON.
+- **Playbook:** add formations, routes (waypoints relative to alignment), and concepts in `js/sim/playbook.js`. The play-caller picks them up automatically.
+- **Tuning knobs:** tackle probability and reach (`checkTackles` in `playsim.js`), block shed rates (`engagements`), QB read thresholds (`qbPass` in `ai.js`), and man-coverage lag (`manThink`).
