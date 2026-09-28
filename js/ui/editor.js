@@ -1,6 +1,7 @@
 import { RATING_KEYS, RATING_LABELS, POSITIONS, computeOvr, teamRatings, generateTeam } from '../data/teamgen.js';
 import { saveLeague, resetLeague, exportLeagueJSON, importLeagueJSON } from '../data/storage.js';
 import { FRANCHISES } from '../data/names.js';
+import { TRAITS, traitsFor } from '../data/traits.js';
 import { RNG } from '../util/rng.js';
 
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -63,7 +64,7 @@ export class TeamEditor {
           </div>
           <div class="pos-filter">${['ALL', ...POSITIONS].map((p) => `<button data-pos="${p}" class="${p === this.posFilter ? 'on' : ''}">${p}</button>`).join('')}</div>
           <div class="ed-roster"><table>
-            <tr><th>#</th><th>First</th><th>Last</th><th>Pos</th><th>Ht</th><th>Wt</th><th>OVR</th>${RATING_KEYS.map((k) => `<th title="${RATING_LABELS[k]}">${k.toUpperCase()}</th>`).join('')}</tr>
+            <tr><th>#</th><th>First</th><th>Last</th><th>Pos</th><th>Ht</th><th>Wt</th><th>OVR</th><th>Traits</th>${RATING_KEYS.map((k) => `<th title="${RATING_LABELS[k]}">${k.toUpperCase()}</th>`).join('')}</tr>
             ${roster.map((p) => `<tr data-pid="${p.id}">
               <td><input data-p="num" value="${p.num}" type="number" min="0" max="99" /></td>
               <td><input class="nm" data-p="first" value="${esc(p.first)}" /></td>
@@ -72,6 +73,7 @@ export class TeamEditor {
               <td><input data-p="height" value="${p.height}" type="number" min="64" max="84" title="inches" /></td>
               <td><input data-p="weight" value="${p.weight}" type="number" min="150" max="380" /></td>
               <td class="ovr">${p.ovr}</td>
+              <td style="white-space:nowrap">${[0, 1].map((i) => `<select class="tr" data-t="${i}" title="${esc(TRAITS[(p.traits || [])[i]]?.desc || 'No trait')}"><option value="">—</option>${traitsFor(p.pos).map((k) => `<option value="${k}" ${(p.traits || [])[i] === k ? 'selected' : ''}>${TRAITS[k].name}</option>`).join('')}</select>`).join('')}</td>
               ${RATING_KEYS.map((k) => `<td><input data-r="${k}" value="${p.ratings[k]}" type="number" min="20" max="99" /></td>`).join('')}
             </tr>`).join('')}
           </table></div>
@@ -108,6 +110,13 @@ export class TeamEditor {
         else p[k] = Math.round(+i.value) || p[k];
         p.ovr = computeOvr(p);
         row.querySelector('.ovr').textContent = p.ovr;
+        save();
+      }));
+      row.querySelectorAll('[data-t]').forEach((i) => i.addEventListener('change', () => {
+        const tr = [...(p.traits || [])];
+        tr[+i.dataset.t] = i.value;
+        p.traits = [...new Set(tr.filter(Boolean))];
+        i.title = TRAITS[i.value]?.desc || 'No trait';
         save();
       }));
       row.querySelectorAll('[data-r]').forEach((i) => i.addEventListener('change', () => {

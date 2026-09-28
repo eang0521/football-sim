@@ -33,6 +33,7 @@
       </div>
       <div class="sb-clock"><span id="sb-q"></span><span id="sb-time"></span></div>
       <div class="sb-down" id="sb-down"></div>
+      <div id="momentum" title="Momentum"><span class="mo-away"></span><span class="mo-home"></span><i></i></div>
     </header>
 
     <div id="banner" class="hidden">
@@ -78,6 +79,7 @@
       <div class="group">
         <button id="btn-box">Box score</button>
         <button id="btn-teams">Teams</button>
+        <button id="btn-season">Season</button>
         <button id="btn-new" class="primary">New game</button>
       </div>
     </nav>
@@ -111,6 +113,16 @@
             <option value="900" selected>15 min (full)</option>
           </select>
         </label>
+        <label>Weather
+          <select id="ng-weather">
+            <option value="random" selected>Random</option>
+            <option value="clear">Clear</option>
+            <option value="rain">Rain</option>
+            <option value="snow">Snow</option>
+            <option value="wind">Windy</option>
+            <option value="cold">Cold</option>
+          </select>
+        </label>
         <label>Seed <input id="ng-seed" type="number" placeholder="random" /></label>
       </div>
       <div class="actions">
@@ -125,6 +137,14 @@
     <div class="modal-card wide">
       <div class="modal-head"><h2>Box Score</h2><button class="icon-btn close" data-close="modal-box">&times;</button></div>
       <div id="box-body"></div>
+    </div>
+  </div>
+
+  <!-- Season -->
+  <div class="modal hidden" id="modal-season">
+    <div class="modal-card wide">
+      <div class="modal-head"><h2>Season</h2><button class="icon-btn close" data-close="modal-season">&times;</button></div>
+      <div id="season-body"></div>
     </div>
   </div>
 

@@ -1,9 +1,10 @@
 // Special teams: kickoffs, punts, field goals and extra points.
 // Frame: kicking team is 'O' and kicks toward +x.
 import { FIELD_W, MID_Y, GRAVITY } from './constants.js';
-import { Picker, makeAgent } from './setup.js';
+import { Picker, makeAgent, buildRoute } from './setup.js';
 import { clamp, norm } from '../util/vec.js';
-import { runnerThink, pursue, escortBlock, goTo, attackDir } from './ai.js';
+import { runnerThink, pursue, escortBlock, goTo, attackDir, evaluateTarget } from './ai.js';
+import { windAlong, effectiveKickDist } from './weather.js';
 
 const shortName = (p) => (p ? `${p.first[0]}.${p.last}` : '?');
 
@@ -36,8 +37,10 @@ function setupKickoff(sim, cfg) {
   const k = makeAgent(K, 'O', 'K', los - 6, MID_Y);
   k.special = kickerKO; off.push(k);
   // Dynamic kickoff (2024+ rules): coverage lines up at the receiving 40 and can't move until the ball lands or is touched.
-  const ys = [4, 9, 14, 19, 23.5, 29.8, 34.3, 39.3, 44.3, 49.3];
-  cov.forEach((p, i) => { const a = makeAgent(p, 'O', 'COV' + i, los + 25, ys[i]); a.special = coverage; a.d.laneY = ys[i]; off.push(a); });
+  const onside = cfg.kickType === 'onside';
+  sim.st.kickType = cfg.kickType || 'normal';
+  const ys = onside ? [8, 12, 16, 20, 23.5, 29.8, 33.3, 37.3, 41.3, 45.3] : [4, 9, 14, 19, 23.5, 29.8, 34.3, 39.3, 44.3, 49.3];
+  cov.forEach((p, i) => { const a = makeAgent(p, 'O', 'COV' + i, onside ? los - 1 : los + 25, ys[i]); a.special = coverage; a.d.laneY = ys[i]; off.push(a); });
   // Return team
   const d = rp.d;
   const ret1 = [...d.RB, ...d.WR, ...d.CB].filter((p) => !rp.used.has(p.id)).sort((a, b) => (b.ratings.spd + b.ratings.btk) - (a.ratings.spd + a.ratings.btk))[0];
@@ -45,10 +48,11 @@ function setupKickoff(sim, cfg) {
   const ret2 = rp.take('RB');
   const blk = takeMany(rp, ['LB', 'LB', 'TE', 'FB', 'LB', 'S', 'TE', 'DE', 'S']);
   const def = [];
-  const r1 = makeAgent(ret1, 'D', 'KR', los + 62, MID_Y + 4); r1.special = returner; def.push(r1);
-  const r2 = makeAgent(ret2, 'D', 'KR2', los + 60, MID_Y - 5); r2.special = retBlocker; def.push(r2);
+  // onside: the "hands team" crowds up to 10-15 yards from the kick
+  const r1 = makeAgent(ret1, 'D', 'KR', onside ? los + 28 : los + 62, MID_Y + 4); r1.special = returner; def.push(r1);
+  const r2 = makeAgent(ret2, 'D', 'KR2', onside ? los + 18 : los + 60, MID_Y - 5); r2.special = retBlocker; def.push(r2);
   const bY = [6, 12, 18, 24, 29.5, 35.5, 41.5, 20, 33];
-  blk.forEach((p, i) => { const a = makeAgent(p, 'D', 'RB' + i, los + (i < 7 ? 30.5 : 35), bY[i]); a.special = retBlocker; def.push(a); });
+  blk.forEach((p, i) => { const a = makeAgent(p, 'D', 'RB' + i, onside ? los + (i < 7 ? 13 : 17) : los + (i < 7 ? 30.5 : 35), bY[i]); a.special = retBlocker; def.push(a); });
   sim.off = off; sim.def = def; sim.snapper = k;
   sim.kr = r1;
   sim.onSnap = () => {
@@ -60,15 +64,38 @@ function setupKickoff(sim, cfg) {
   sim.st.kicker = k;
 }
 
+// Onside: everybody chases the bouncing ball.
+function chaseOnside(sim, a) {
+  const B = sim.ball;
+  if (sim.st.kickType !== 'onside' || sim.runner || B.state === 'tee' || sim.phase !== 'live') return false;
+  // the hands team reacts a beat late to the dribbled kick
+  if (a.side === 'D' && sim.t < (sim.st.kickT ?? 0) + 0.5) { goTo(a, a.x, a.y, 1); a.faceTo = B; return true; }
+  goTo(a, B.x + B.vx * 0.2, B.y + B.vy * 0.2, a.maxSpd, false);
+  a.faceTo = null;
+  return true;
+}
+
 function kickerKO(sim, a) {
   if (sim.runner) return sim.runner.side !== a.side ? pursue(sim, a, sim.runner) : null;
+  if (chaseOnside(sim, a)) return;
   if (sim.ball.state === 'tee') {
     goTo(a, sim.los - 0.3, sim.ballY, a.maxSpd * 0.8, false);
     if (Math.hypot(a.x - sim.los, a.y - sim.ballY) < 0.8) {
       const kp = a.r.kpw;
-      const dist = 59 + (kp - 75) * 0.3 + sim.rng.normal(0, 4.5);
-      const land = { x: Math.min(sim.los + dist, 108), y: clamp(MID_Y + sim.rng.normal(0, 6), 6, FIELD_W - 6) };
-      launch(sim, a, land, 3.9 + sim.rng.normal(0, 0.2), 'kickoff');
+      const W = sim.cfg.weather;
+      if (sim.st.kickType === 'onside') {
+        const side = sim.rng.chance(0.5) ? 1 : -1;
+        const land = { x: sim.los + sim.rng.range(6, 9), y: clamp(MID_Y + side * sim.rng.range(6, 14), 4, FIELD_W - 4) };
+        launch(sim, a, land, 0.6, 'kickoff', { onside: true, zEnd: 0.15 });
+        sim.st.kickLive = true; sim.st.kickT = sim.t;
+      } else if (sim.st.kickType === 'squib') {
+        const land = { x: sim.los + 38 + sim.rng.range(0, 7), y: clamp(MID_Y + sim.rng.normal(0, 7), 6, FIELD_W - 6) };
+        launch(sim, a, land, 1.5, 'kickoff', { squib: true, zEnd: 0.15 });
+      } else {
+        const dist = 59 + (kp - 75) * 0.3 + sim.rng.normal(0, 4.5) + (W ? W.kickYds + windAlong(W, sim.cfg.dir) * 0.25 : 0);
+        const land = { x: Math.min(sim.los + dist, 108), y: clamp(MID_Y + sim.rng.normal(0, 6), 6, FIELD_W - 6) };
+        launch(sim, a, land, 3.9 + sim.rng.normal(0, 0.2), 'kickoff');
+      }
       a.anim = 'kick'; a.animT = 0;
     }
     return;
@@ -93,6 +120,7 @@ function coverage(sim, a) {
   const B = sim.ball;
   if (sim.runner && sim.runner.side !== a.side) return pursue(sim, a, sim.runner);
   if (sim.runner) return escortBlock(sim, a, sim.runner);
+  if (chaseOnside(sim, a)) return;
   if (sim.kind === 'kickoff' && !sim.st.kickLive) { goTo(a, a.x, a.y, 0.5); a.faceTo = B; return; }
   if (B.state === 'tee') { goTo(a, sim.los - 0.8, a.y, 2.5); return; }
   const land = B.pass?.land || { x: a.x + 20, y: a.y };
@@ -102,9 +130,15 @@ function coverage(sim, a) {
 }
 
 function retBlocker(sim, a) {
-  const c = sim.runner;
+  const w = sim.st.fakeTarget;
+  if (w && sim.kind === 'punt' && !sim.runner && sim.t > 0.45 + (100 - a.r.awr) / 250) {
+    goTo(a, w.x + w.vx * 0.3 + 1, w.y + w.vy * 0.3, a.maxSpd, false);
+    return;
+  }
+  const c = fooled(sim, a) ? null : sim.runner;
   if (c && c.side === a.side) return escortBlock(sim, a, c);
   if (c && c.side !== a.side) return pursue(sim, a, c);
+  if (chaseOnside(sim, a)) return;
   const B = sim.ball;
   const land = B.pass?.land;
   if (!land) { goTo(a, a.x, a.y, 1); return; }
@@ -120,6 +154,7 @@ function returner(sim, a) {
   if (sim.carrierAgent() === a && a.d.runner) return runnerThink(sim, a);
   if (sim.runner && sim.runner.side !== a.side) return pursue(sim, a, sim.runner);
   if (sim.runner) return escortBlock(sim, a, sim.runner);
+  if (chaseOnside(sim, a)) return;
   const land = B.pass?.land;
   if (!land || !B.pass?.kick) { goTo(a, a.x, a.y, 1); return; }
   if (B.pass.letBounce) { goTo(a, land.x - 8, land.y, a.maxSpd * 0.6); a.faceTo = B; return; }
@@ -143,7 +178,7 @@ function kickBallUpdate(B, P) {
   // Out of bounds in flight (low)
   if ((B.y < 0 || B.y > FIELD_W) && B.z < 1.5) return sim.whistle('oob', B.x);
   const ret = sim.kr;
-  if (!P.letBounce && ret && !ret.down && t > P.t0 + P.T * 0.6 && B.z < 2.7) {
+  if (!P.letBounce && !P.onside && ret && !ret.down && t > P.t0 + P.T * 0.6 && B.z < 2.7) {
     if (Math.hypot(ret.x - B.x, ret.y - B.y) < 1.3) {
       if (sim.rng.chance(0.012 + (100 - ret.r.cth) / 100 * 0.02)) {
         // muff: ball falls, return team recovers most of the time
@@ -164,6 +199,12 @@ function kickBallUpdate(B, P) {
   if (B.z <= 0.12) {
     sim.st.kickLive = true;
     // hit the ground
+    if (P.onside) {
+      // the ball takes a big hop and keeps bouncing: whoever wins the scrum gets it
+      B.state = 'roll'; B.onside = true; B.rollT = 0; B.pass = null;
+      B.vx = sim.rng.range(3, 6.5); B.vy = sim.rng.normal(0, 2.5); B.vz = 0; B.z = 0.12;
+      return;
+    }
     if (P.kind === 'kickoff') {
       if (B.x >= 100) return sim.whistle('touchback', B.x);
       // nearest returner scoops it
@@ -183,8 +224,38 @@ function kickBallUpdate(B, P) {
   }
 }
 
+function onsideScrum(sim, dt) {
+  const B = sim.ball;
+  B.rollT += dt;
+  B.vx *= 1 - 1.1 * dt; B.vy *= 1 - 1.1 * dt;
+  B.x += B.vx * dt; B.y += B.vy * dt;
+  B.z = 0.12 + Math.abs(Math.sin(B.rollT * 7)) * Math.min(0.9, Math.hypot(B.vx, B.vy) * 0.15);
+  B.rot += dt * 10;
+  if (B.y < 0 || B.y > FIELD_W) return sim.whistle('oob', B.x);
+  // the kicking team may only recover once the ball has gone 10 yards
+  const legal = (a) => a.side === 'D' || B.x >= sim.los + 10;
+  const cands = sim.agents.filter((a) => !a.down && legal(a) && Math.hypot(a.x - B.x, a.y - B.y) < 0.9 && !(a.d.grabT > sim.t));
+  cands.sort((p, q) => Math.hypot(p.x - B.x, p.y - B.y) - Math.hypot(q.x - B.x, q.y - B.y));
+  for (const a of cands) {
+    a.d.grabT = sim.t + 0.35;
+    if (sim.rng.chance(a.side === 'D' ? 0.36 : 0.5)) {
+      B.state = 'held'; B.holder = a; B.onside = false;
+      a.down = true; a.anim = 'down';
+      sim.st.onsideRec = a;
+      return sim.whistle('onside', B.x);
+    }
+    B.vx = sim.rng.normal(0, 3); B.vy = sim.rng.normal(0, 3); // bobbled
+  }
+  if (Math.hypot(B.vx, B.vy) < 0.3 || B.rollT > 5) {
+    const r = sim.agents.filter((a) => !a.down && legal(a))
+      .sort((p, q) => Math.hypot(p.x - B.x, p.y - B.y) + sim.rng.range(0, 1) - Math.hypot(q.x - B.x, q.y - B.y) - sim.rng.range(0, 1))[0];
+    if (r) { B.state = 'held'; B.holder = r; sim.st.onsideRec = r; r.down = true; return sim.whistle('onside', B.x); }
+  }
+}
+
 export function rollUpdate(sim, dt) {
   const B = sim.ball;
+  if (B.onside) return onsideScrum(sim, dt);
   B.rollT += dt;
   B.vx *= 1 - 1.4 * dt; B.vy *= 1 - 1.4 * dt;
   B.x += B.vx * dt; B.y += B.vy * dt;
@@ -211,6 +282,15 @@ function kickResult(outcome, spotX) {
   const ret = sim.kr;
   const nm = (a) => shortName(a?.p);
   res.events.push({ type: 'kick', pid: k.p.id, ko: 1, tb: outcome === 'touchback' ? 1 : 0 });
+  if (outcome === 'onside') {
+    const r = st.onsideRec;
+    res.spotX = clamp(spotX, 1, 99);
+    res.kind = 'onside';
+    if (r.side === 'O') { res.possession = 'O'; res.desc = `ONSIDE KICK RECOVERED by ${nm(r)}! ${nm(k)} gets it back for the kicking team.`; }
+    else res.desc = `Onside kick by ${nm(k)} is recovered by ${nm(r)}.`;
+    return res;
+  }
+  if (sim.st.kickType === 'squib' && outcome !== 'td') res.squib = true;
   if (outcome === 'touchback') {
     res.touchback = true; res.spotX = 65;
     res.desc = `${nm(k)} kicks ${kdist} yards. Touchback.`;
@@ -223,7 +303,7 @@ function kickResult(outcome, spotX) {
   }
   const retYds = Math.round((st.catchX ?? spotX) - spotX);
   res.events.push({ type: 'ret', pid: ret.p.id, kr: 1, yds: retYds, td: outcome === 'td' ? 1 : 0 });
-  res.desc = `${nm(k)} kicks ${kdist} yards, ${nm(ret)} returns ${retYds} yards`;
+  res.desc = `${nm(k)} ${sim.st.kickType === 'squib' ? 'squibs it' : 'kicks'} ${kdist} yards, ${nm(ret)} returns ${retYds} yards`;
   if (outcome === 'td') { res.td = 'D'; res.spotX = 0; res.desc += ' for a TOUCHDOWN!'; return res; }
   if (spotX >= 100 && !st.fumble) { res.touchback = true; res.spotX = 80; res.desc += ', downed in the end zone. Touchback.'; return res; }
   finishTackle(sim, res, st);
@@ -286,6 +366,15 @@ function setupPunt(sim, cfg) {
   r1.special = returner; def.push(r1);
   sim.off = off; sim.def = def; sim.snapper = off[0]; sim.kr = r1;
   sim.st.kicker = pA;
+  sim.st.fake = !!cfg.fake;
+  if (sim.st.fake) {
+    const wingSlot = sim.rng.chance(0.5) ? 'W0' : 'W1';
+    const wing = off.find((a) => a.slot === wingSlot);
+    wing.special = null;
+    wing.role = 'route';
+    wing.d.route = buildRoute(wing, 'arrow', Math.sign(wing.y - ballY) || 1, los);
+    sim.st.fakeTarget = wing;
+  }
   sim.onSnap = () => {
     sim.throwBall(sim.snapper, pA, { c: { x: pA.x, y: pA.y }, T: 0.75, snap: true });
     sim.ball.z = 0.4;
@@ -297,6 +386,7 @@ function setupPunt(sim, cfg) {
 function punter(sim, a) {
   const B = sim.ball;
   if (sim.runner && sim.runner.side !== a.side) return pursue(sim, a, sim.runner);
+  if (sim.st.fake && B.state === 'held' && B.holder === a) return fakeThrow(sim, a, 0.45);
   if (B.state === 'held' && B.holder === a && !sim.st.punted) {
     goTo(a, a.x + 0.8, a.y, 1.5);
     if (!a.d.caughtT) a.d.caughtT = sim.t;
@@ -304,7 +394,8 @@ function punter(sim, a) {
       sim.st.punted = true;
       const r = a.r;
       // gross distance measured from the line of scrimmage
-      let gross = 46 + (r.kpw - 75) * 0.35 + sim.rng.normal(0, 5);
+      const W = sim.cfg.weather;
+      let gross = 46 + (r.kpw - 75) * 0.35 + sim.rng.normal(0, 5) + (W ? W.kickYds + windAlong(W, sim.cfg.dir) * 0.3 : 0);
       const toGoal = 100 - sim.los;
       // pin it inside the 10 when the field is short
       if (toGoal < 58) gross = Math.min(gross, toGoal - 6 - (r.kac / 100) * 3 + sim.rng.normal(0, 3.5));
@@ -364,7 +455,7 @@ function gunner(sim, a) {
 }
 
 function jammer(sim, a) {
-  const c = sim.runner;
+  const c = fooled(sim, a) ? null : sim.runner;
   if (c && c.side === a.side) return escortBlock(sim, a, c);
   if (c && c.side !== a.side) return pursue(sim, a, c);
   const g = a.d.gunner;
@@ -374,8 +465,11 @@ function jammer(sim, a) {
   goTo(a, g.x + u.x * 0.9, g.y + u.y * 0.9, a.maxSpd, false);
 }
 
+// On a fake the return unit keeps doing its punt-return job for a beat before it recognizes the run.
+const fooled = (sim, a) => sim.st.fake && sim.t < 0.55 + (100 - a.r.awr) / 100 * 0.6;
+
 function puntRush(sim, a) {
-  const c = sim.runner;
+  const c = fooled(sim, a) ? null : sim.runner;
   if (c && c.side === a.side) return escortBlock(sim, a, c);
   if (c && c.side !== a.side) return pursue(sim, a, c);
   const B = sim.ball;
@@ -400,6 +494,7 @@ function puntResult(outcome, spotX) {
   };
   const P = st.kicker;
   const nm = (a) => shortName(a?.p);
+  if (st.fake) return fakePassResult(sim, res, outcome, spotX, st.kicker, 'FAKE PUNT!');
   if (!st.punted) {
     // snap trouble: punter tackled with the ball
     res.possession = 'D'; res.turnover = true;
@@ -435,6 +530,51 @@ function puntResult(outcome, spotX) {
   return res;
 }
 
+// Fakes: the kicker/holder/punter throws to a wing who leaked out.
+function fakeThrow(sim, a, after) {
+  if (sim.st.fakeThrown) return;
+  const w = sim.st.fakeTarget;
+  if (!a.d.caughtT) a.d.caughtT = sim.t;
+  goTo(a, a.x - 0.3, a.y + Math.sign(w.y - a.y) * 1.2, 3);
+  if (sim.t - a.d.caughtT < after) return;
+  const ev = evaluateTarget(sim, a, w);
+  if ((ev && !ev.notReady) || sim.t - a.d.caughtT > after + 0.7) {
+    sim.st.fakeThrown = true;
+    const c = ev && !ev.notReady ? ev : { c: { x: w.x + 2, y: w.y }, v: 16, T: 0.5 };
+    sim.throwBall(a, w, c);
+    a.anim = 'throw'; a.animT = 0;
+  }
+}
+
+function fakePassResult(sim, res, outcome, spotX, thrower, head) {
+  const st = sim.st;
+  res.fake = true; res.kind = 'pass'; res.possession = 'O'; res.clockStops = false; res.events = [];
+  const w = st.fakeTarget;
+  const nmA = (x) => shortName(x?.p);
+  if (st.catcher) {
+    let yds = Math.round((spotX ?? sim.los) - sim.los);
+    if (outcome === 'td') { res.td = 'O'; yds = Math.round(100 - sim.los); res.spotX = 100; res.clockStops = true; }
+    else res.spotX = spotX;
+    res.events.push({ type: 'pass', pid: thrower.p.id, att: 1, cmp: 1, yds, td: res.td ? 1 : 0 });
+    res.events.push({ type: 'rec', pid: st.catcher.p.id, tgt: 1, rec: 1, yds, td: res.td ? 1 : 0, long: yds });
+    res.desc = `${head} ${nmA(thrower)} throws to ${nmA(st.catcher)} for ${yds} yard${Math.abs(yds) === 1 ? '' : 's'}${res.td ? ', TOUCHDOWN!' : '.'}`;
+    if (st.tacklers?.length) st.tacklers.forEach((t, i) => res.events.push({ type: 'def', pid: t.p.id, ...(i === 0 ? { tkl: 1 } : { ast: 1 }) }));
+    if (st.fumble?.lost) { res.possession = 'D'; res.turnover = true; }
+  } else if (st.int) {
+    res.possession = 'D'; res.turnover = true; res.spotX = spotX;
+    res.events.push({ type: 'pass', pid: thrower.p.id, att: 1, int: 1 });
+    res.desc = `${head} ${nmA(thrower)}'s pass is INTERCEPTED by ${nmA(st.int)}.`;
+  } else if (!st.fakeThrown) {
+    res.kind = 'sack'; res.spotX = spotX;
+    res.desc = `${head} ${nmA(thrower)} is swarmed before he can throw.`;
+  } else {
+    res.spotX = sim.los; res.clockStops = true;
+    res.events.push({ type: 'pass', pid: thrower.p.id, att: 1 });
+    res.desc = `${head} ${nmA(thrower)}'s pass for ${nmA(w)} falls incomplete.`;
+  }
+  return res;
+}
+
 function yardLine(ballOn) {
   const b = Math.round(ballOn);
   return b <= 50 ? `own ${b}` : `opp ${100 - b}`;
@@ -464,6 +604,15 @@ function setupFG(sim, cfg) {
   });
   sim.off = off; sim.def = def; sim.snapper = off[0];
   sim.st.kicker = kA; sim.st.holder = hA;
+  sim.st.fake = !!cfg.fake;
+  if (sim.st.fake) {
+    const wingSlot = sim.rng.chance(0.5) ? 'FL7' : 'FL8';
+    const wing = off.find((a) => a.slot === wingSlot);
+    wing.special = null;
+    wing.role = 'route';
+    wing.d.route = buildRoute(wing, 'arrow', Math.sign(wing.y - ballY) || 1, los);
+    sim.st.fakeTarget = wing;
+  }
   const dist = Math.round(100 - los + 17);
   sim.st.fgDist = dist;
   sim.onSnap = () => {
@@ -475,18 +624,20 @@ function setupFG(sim, cfg) {
 }
 
 function holder(sim, a) {
+  if (sim.st.fake && sim.carrierAgent() === a) return fakeThrow(sim, a, 0.5);
   goTo(a, a.x, a.y, 0.5);
   if (sim.ball.holder === a) { a.anim = 'kneel'; sim.ball.z = 0.35; }
 }
 function fgKicker(sim, a) {
   const B = sim.ball;
   const h = sim.st.holder;
-  if (sim.st.kicked) { goTo(a, a.x + 1, a.y, 1.5); return; }
+  if (sim.st.kicked || sim.st.fake) { goTo(a, a.x + 1, a.y, 1.5); return; }
   if (B.holder === h && sim.t > 0.75) {
     goTo(a, h.x - 0.6, h.y + 0.4, 5, false);
     if (Math.hypot(a.x - (h.x - 0.6), a.y - (h.y + 0.4)) < 0.4 || sim.t > 1.6) {
       sim.st.kicked = true;
-      const p = fgProbability(a.p, sim.st.fgDist);
+      const W = sim.cfg.weather;
+      const p = Math.max(0, fgProbability(a.p, effectiveKickDist(W, sim.st.fgDist, sim.cfg.dir)) - (W?.fgPen ?? 0));
       const good = sim.rng.chance(p);
       const kx = h.x;
       const T = (110 - kx) / 22;
@@ -519,10 +670,17 @@ function fgProtect(sim, a) {
 function fgRush(sim, a) {
   const h = sim.st.holder;
   if (sim.phase !== 'live') return;
-  goTo(a, h.x, h.y, a.maxSpd, false);
+  if (sim.runner && !fooled(sim, a)) return pursue(sim, a, sim.runner);
+  // the two defenders playing back pick up a leaking wing once they read the fake
+  const w = sim.st.fakeTarget;
+  if (w && a.ax > sim.los + 3 && sim.t > 0.35 + (100 - a.r.awr) / 250) {
+    goTo(a, w.x + w.vx * 0.3 + 1, w.y + w.vy * 0.3, a.maxSpd, false);
+    return;
+  }
+  goTo(a, h.ax, h.ay, a.maxSpd, false);
 }
 
-function fgResult(outcome) {
+function fgResult(outcome, spotX) {
   const sim = this;
   const st = sim.st;
   const K = st.kicker;
@@ -533,6 +691,7 @@ function fgResult(outcome) {
     elapsed: sim.t, clockStops: true, events: [], desc: '', turnover: false, good, dist: st.fgDist, tacklers: [],
   };
   const nm = shortName(K.p);
+  if (st.fake && !xp) return fakePassResult(sim, res, outcome, spotX, st.holder, 'FAKE FIELD GOAL!');
   if (xp) {
     res.events.push({ type: 'kick', pid: K.p.id, xpa: 1, xpm: good ? 1 : 0 });
     res.desc = good ? `${nm} extra point is GOOD.` : `${nm} extra point is NO GOOD${st.wide ? ` (wide ${st.wide})` : ''}.`;

@@ -1,7 +1,9 @@
 // Core per-play simulation: agents, physics, blocking, ball flight, catches, tackles.
 import { DT, FIELD_W, MID_Y, GRAVITY, PLAYER_R, ENGAGE_R, TACKLE_R, MAX_PLAY_TIME } from './constants.js';
 import { clamp, norm, angleDiff } from '../util/vec.js';
-import { setupScrimmage } from './setup.js';
+import { setupScrimmage, setAgentContext } from './setup.js';
+import { hasTrait } from '../data/traits.js';
+import { throwFactor } from './weather.js';
 import { think, attackDir } from './ai.js';
 import { setupSpecial, rollUpdate } from './special.js';
 
@@ -33,10 +35,16 @@ export class PlaySim {
     this.run = null;
     this.fouls = [];
     this.injuries = [];
+    setAgentContext(cfg);
     if (this.kind === 'scrimmage' || this.kind === 'kneel') setupScrimmage(this, cfg);
     else setupSpecial(this, cfg);
     this.agents = [...this.off, ...this.def];
     for (const a of this.agents) { a.ax = a.x; a.ay = a.y; }
+    if (this.motion) {
+      const M = this.motion;
+      M.m.ax = M.origin.x; M.m.ay = M.origin.y;
+      if (M.man) { M.man.ax = M.origin.x + M.manOffset.x; M.man.ay = M.origin.y + M.manOffset.y; }
+    }
     const snapper = this.snapper || this.bySlotO?.C || this.off[0];
     this.ball = {
       state: 'held', holder: snapper, x: this.los, y: this.ballY, z: 0.15, vx: 0, vy: 0, vz: 0,
@@ -93,6 +101,7 @@ export class PlaySim {
 
   // Possible injury on a hit. base = probability scale for this collision.
   maybeInjure(a, base) {
+    if (hasTrait(a.p, 'iron_man')) base *= 0.5;
     if (a.injured || this.kind === 'kneel' || !this.rng.chance(base)) return;
     a.injured = true;
     a.down = true; a.downT = 0; a.anim = 'down';
@@ -115,9 +124,9 @@ export class PlaySim {
       const pressure = this.pass?.pressure || 0;
       const onRun = qb.d.scramble ? 1.5 : 1;
       // Error along the throw line grows fast with distance (over/under-throws); lateral error less so.
-      const acc = (1.6 - qb.r.tha / 100) * (1 + pressure * 0.9) * onRun;
-      const sAlong = (0.15 + d0 * 0.016 + Math.max(0, d0 - 20) * 0.06) * acc;
-      const sLat = (0.15 + d0 * 0.014) * acc;
+      const acc = (1.75 - qb.r.tha / 100) * 1.55 * (1 + pressure * 0.9) * onRun * throwFactor(this.cfg.weather, d0);
+      const sAlong = (0.35 + d0 * 0.016 + Math.max(0, d0 - 20) * 0.06) * acc;
+      const sLat = (0.35 + d0 * 0.014) * acc;
       const ux = (c.x - qb.x) / (d0 || 1), uy = (c.y - qb.y) / (d0 || 1);
       const ea = this.rng.normal(0, sAlong), el = this.rng.normal(0, sLat);
       c.x += ux * ea - uy * el; c.y += uy * ea + ux * el;
@@ -140,6 +149,11 @@ export class PlaySim {
   }
 
   startSet(instant) {
+    if (instant && this.motion) {
+      const M = this.motion;
+      M.m.ax = M.final.x; M.m.ay = M.final.y; M.done = true;
+      if (M.man) { M.man.ax = M.final.x + M.manOffset.x; M.man.ay = M.final.y + M.manOffset.y; }
+    }
     for (const a of this.agents) {
       a.x = a.ax; a.y = a.ay; a.vx = 0; a.vy = 0;
       a.face = a.side === 'O' ? 0 : Math.PI;
@@ -160,7 +174,27 @@ export class PlaySim {
     const qb = this.qb();
     if (this.kind === 'kneel') {
       this.ball.holder = qb; this.ball.state = 'held';
-      this.after(0.7, () => { qb.down = true; this.st.kneel = true; this.whistle('tackle', qb.x - 0.5); });
+      if (this.cfg.spike) {
+        this.after(0.55, () => {
+          this.st.spike = true;
+          this.whistle('incomplete', this.los);
+          const B = this.ball; B.state = 'dead-air'; B.holder = null; B.vx = 5; B.vy = 0; B.vz = -4; B.z = 1.4;
+          qb.anim = 'throw'; qb.animT = 0;
+        });
+      } else if (this.cfg.intSafety) {
+        // run around in the end zone, then step out of the back of it
+        const y0 = qb.y;
+        qb.special = (sim, a) => {
+          const pts = [{ x: -2, y: y0 }, { x: -3, y: clamp(y0 + 9, 2, FIELD_W - 2) }, { x: -4, y: clamp(y0 - 6, 2, FIELD_W - 2) }, { x: -11, y: y0 }];
+          a.d.si = a.d.si || 0;
+          const p = pts[Math.min(a.d.si, pts.length - 1)];
+          if (Math.hypot(p.x - a.x, p.y - a.y) < 1) a.d.si++;
+          a.want = { x: p.x, y: p.y, spd: a.maxSpd * 0.8, arrive: false };
+          if (a.x < -10 || sim.t > 7) { sim.st.intSafety = true; sim.whistle('oob', -1); }
+        };
+      } else {
+        this.after(0.7, () => { qb.down = true; this.st.kneel = true; this.whistle('tackle', qb.x - 0.5); });
+      }
       return;
     }
     // press jams at the line
@@ -171,6 +205,17 @@ export class PlaySim {
         const edge = ((d.r.str + d.r.mcv) - (r.r.str + r.r.rte)) / 200 + 0.2 + this.rng.normal(0, 0.15);
         if (edge > 0) r.d.jamT = Math.min(0.7, edge * 1.4);
         else d.stun = Math.min(0.5, -edge * 1.6);
+      }
+    }
+    // Motion tell: did a defender travel with the motion man?
+    if (this.motion && this.pass) {
+      this.pass.tell = this.motion.man ? 'man' : 'zone';
+      this.note('motion', this.motion.m, this.motion.man);
+    }
+    // Run flow: second-level defenders step downhill as the line run-blocks
+    if (this.isRun && this.kind === 'scrimmage') for (const d of this.def) {
+      if ((d.fpos === 'LB' || d.slot === 'SS' || d.slot === 'NB') && d.role !== 'rush' && this.rng.chance(0.85 - (d.r.awr - 55) / 90)) {
+        d.d.biteUntil = 0.25 + (100 - d.r.awr) / 100 * 0.5 + this.rng.range(0, 0.3);
       }
     }
     // PA bite for linebackers / safeties
@@ -221,6 +266,7 @@ export class PlaySim {
     if (this.phase === 'lineup') return this.stepLineup(dt);
     if (this.phase === 'set') {
       this.phaseT += dt;
+      if (this.motion && !this.motion.done) return this.stepMotion(dt);
       if (this.phaseT > 0.9) this.snap();
       return;
     }
@@ -236,7 +282,7 @@ export class PlaySim {
     for (const a of this.agents) {
       if (a.stun > 0) a.stun -= dt;
       if (a.down && a.downT > 0) { a.downT -= dt; if (a.downT <= 0) { a.down = false; a.anim = 'run'; } }
-      if (a.d.biteUntil && this.t < a.d.biteUntil && !this.runner && a.side === 'D') {
+      if (a.d.biteUntil && this.t < a.d.biteUntil && !this.runner && a.side === 'D' && !(this.ball.state === 'air' && this.ball.pass && !this.ball.pass.snap)) {
         a.want = { x: this.los + 1.5, y: a.y, spd: a.maxSpd * 0.5, arrive: true };
         continue;
       }
@@ -252,6 +298,8 @@ export class PlaySim {
     this.checkBounds();
     if (this.kind === 'scrimmage') this.checkLiveFouls();
     for (const a of this.agents) {
+      // effort: running and blocking both tire players out
+      a.work += Math.hypot(a.vx, a.vy) * dt * 0.1 + (a.engaged || a.blockers.length ? 0.6 * dt : 0);
       a.hist.push({ x: a.x, y: a.y, vx: a.vx, vy: a.vy });
       if (a.hist.length > HIST_LEN) a.hist.shift();
       a.animT += dt;
@@ -259,6 +307,30 @@ export class PlaySim {
     if (this.t > MAX_PLAY_TIME) {
       const c = this.carrierAgent();
       this.whistle('tackle', c ? c.x : this.los);
+    }
+  }
+
+  // Motion man jogs across during the cadence; his man defender trails him.
+  stepMotion(dt) {
+    const M = this.motion;
+    if (this.phaseT < 0.5) return;
+    const m = M.m;
+    const d = Math.hypot(M.final.x - m.x, M.final.y - m.y);
+    m.want = { x: M.final.x, y: M.final.y, spd: 6.5, arrive: true };
+    m.faceTo = { x: m.x + (M.final.y > m.y ? 0 : 0), y: M.final.y };
+    m.anim = 'run';
+    steer(this, m, dt);
+    if (M.man) {
+      const t = M.man;
+      t.want = { x: m.x + M.manOffset.x, y: m.y + M.manOffset.y, spd: t.maxSpd * 0.8, arrive: true };
+      t.faceTo = { x: t.x - 5, y: t.y }; t.anim = 'run';
+      steer(this, t, dt);
+    }
+    if (d < 0.35 || this.phaseT > 3.8) {
+      M.done = true;
+      m.x = M.final.x; m.y = M.final.y; m.vx = 0; m.vy = 0; m.face = 0; m.anim = 'stance';
+      if (M.man) { M.man.anim = 'stance'; M.man.vx = 0; M.man.vy = 0; M.man.face = Math.PI; }
+      this.phaseT = 0.75; // brief reset, then snap
     }
   }
 
@@ -493,7 +565,10 @@ export class PlaySim {
       if (B.z <= 0.1 || B.y < -1 || B.y > FIELD_W + 1) this.whistle('incomplete', this.los);
       return;
     }
-    if (B.z <= 0.12) { this.whistle('incomplete', this.los); return; }
+    if (B.z <= 0.12) {
+      if (P.target) this.st.groundMiss = { d: Math.hypot(P.target.x - B.x, P.target.y - B.y), dx: P.target.x - B.x, dy: P.target.y - B.y, T: P.T };
+      this.whistle('incomplete', this.los); return;
+    }
     if (B.z > 3.4) return;
     const near = [];
     if (Math.hypot(B.x - P.passer.x, B.y - P.passer.y) < 3) return;
@@ -507,7 +582,7 @@ export class PlaySim {
       // Near the line: only a rare batted ball from a rusher with hands up
       if (a.side === 'D' && (fromQB < 6 || a.role === 'rush') && d < 1.0) {
         P.ignore.add(a);
-        if (B.z < a.height + 0.45 && this.rng.chance(0.18)) {
+        if (B.z < a.height + 0.45 && this.rng.chance(0.07)) {
           this.st.pbu = a; this.note('batted', a);
           this.whistle('incomplete', this.los); B.vz = 3; B.vx *= -0.2; B.vy = this.rng.normal(0, 3);
           return;
@@ -540,7 +615,7 @@ export class PlaySim {
     if (first.a.side === 'D') {
       const d = first.a;
       const contested = offNear.length && offNear[0].d < 1.2;
-      let pInt = 0.05 + d.r.cth / 100 * 0.15 + (d.r.awr - 70) / 600;
+      let pInt = (0.07 + d.r.cth / 100 * 0.17 + (d.r.awr - 70) / 600) * (hasTrait(d.p, 'ball_hawk') ? 1.4 : 1);
       if (contested) pInt *= 0.55;
       if (!inBounds) pInt = 0;
       if (rng.chance(pInt)) return this.interception(d);
@@ -562,13 +637,19 @@ export class PlaySim {
       const tracking = this.t >= (d.d.ballReactAt || 99) ? 1 : 0.45;
       const skill = Math.max(d.r.mcv, d.r.zcv) / 100;
       const airY = (this.st.airYds ?? 10);
-      const depthK = airY < 10 ? 0.6 : airY < 20 ? 0.85 : 1.1;
-      const pPlay = (0.12 + skill * 0.45) * (1 - (n.d / R) ** 2) * tracking * depthK;
+      const depthK = airY < 10 ? 0.85 : airY < 20 ? 0.95 : 1.1;
+      // In phase = the defender is at least as close to the ball as the receiver (can get a hand on it).
+      // Trailing defenders rarely break it up cleanly.
+      const rD = Math.hypot(r.x - B.x, r.y - B.y);
+      const phase = n.d <= rD + 0.25 ? 1 : 0.3;
+      // a trailing defender who grabs to recover: pass interference
+      if (phase < 1 && n.d < 1.3 && airY > 6 && rng.chance(0.07 * (airY > 18 ? 1.6 : 1))) this.foul('dpi', d, B.x, B.y);
+      const pPlay = (0.08 + skill * 0.34) * (1 - (n.d / R) ** 2) * tracking * depthK * phase;
       if (rng.chance(pPlay)) {
         // contact at the catch point: pass interference (worse if not looking back for the ball)
         if (airY > 4 && n.d < 1.2 && rng.chance((tracking < 1 ? 0.45 : 0.2) * (airY > 18 ? 1.5 : 1))) {
           this.foul('dpi', d, B.x, B.y);
-        } else if (rng.chance(0.04 + d.r.cth / 100 * 0.07) && inBounds) return this.interception(d);
+        } else if (rng.chance((0.08 + d.r.cth / 100 * 0.14) * (hasTrait(d.p, 'ball_hawk') ? 1.5 : 1)) && inBounds) return this.interception(d);
         this.st.pbu = d;
         this.whistle('incomplete', this.los);
         B.vz = 2; B.vy += rng.normal(0, 3);
@@ -578,8 +659,9 @@ export class PlaySim {
     const crowd = defNear.filter((n) => n.d < 1.1).length;
     const speed = Math.hypot(r.vx, r.vy);
     const dBall = Math.hypot(r.x - B.x, r.y - B.y);
-    let pCatch = (0.8 + r.r.cth / 100 * 0.18 - crowd * 0.1 - (speed > 8.5 ? 0.02 : 0)) * mult;
-    if (dBall > 0.85) pCatch *= 1 - (dBall - 0.85) * 0.9; // diving / stretching catch
+    let pCatch = (0.86 + r.r.cth / 100 * 0.13 - crowd * (hasTrait(r.p, 'possession') ? 0.03 : 0.07) - (speed > 8.5 ? 0.02 : 0)) * mult;
+    if (dBall > 0.9) pCatch *= 1 - (dBall - 0.9) * 0.55; // diving / stretching catch
+    pCatch *= this.cfg.weather?.catchK ?? 1;
     if (r !== this.st.target) pCatch *= 0.85;
     if (!inBounds || r.y < 0.1 || r.y > FIELD_W - 0.1) { this.st.oobCatch = true; this.whistle('incomplete', this.los); return; }
     if (crowd && (this.st.airYds ?? 0) > 4 && rng.chance(0.05)) this.foul('opi', r);
@@ -658,6 +740,7 @@ export class PlaySim {
       const elus = c.r.btk * 0.55 + c.r.str * 0.2 + c.r.agi * 0.25;
       let p = 0.88 + (o.r.tak - elus) / 150;
       if (o.engaged || o.blockers.length) p *= 0.3;
+      if (this.st.fake && this.t < 1.0) p *= 0.3; // still in rush / return mode on a fake
       const behind = (o.x - c.x) * dirC < -0.3;
       const oSpd = Math.hypot(o.vx, o.vy);
       if (behind && cSpd > oSpd * 0.9) p -= 0.08;
@@ -683,7 +766,7 @@ export class PlaySim {
   tackle(c, o, helpers, cSpd) {
     const dirC = attackDir(c);
     const fwdVel = (c.vx * dirC) / Math.max(1, cSpd);
-    let fall = this.rng.normal(0.8, 0.45) + (c.mass - o.mass) * 0.9 + Math.max(0, c.vx * dirC) * 0.08 + (c.r.str - o.r.str) / 120;
+    let fall = this.rng.normal(0.8, 0.45) + (hasTrait(c.p, 'power_back') ? 0.5 : 0) + (c.mass - o.mass) * 0.9 + Math.max(0, c.vx * dirC) * 0.08 + (c.r.str - o.r.str) / 120;
     fall = clamp(fall, -0.4, 2.2) * (fwdVel > -0.2 ? 1 : 0.2);
     const spot = c.x + dirC * fall;
     c.down = true; c.anim = 'down'; c.downT = 0;
@@ -703,7 +786,7 @@ export class PlaySim {
     }
     // fumble
     const pocketQB = c.role === 'qb' && !c.d.runner;
-    const pF = (0.006 + (100 - c.r.car) / 100 * 0.028) * (pocketQB ? 2.2 : 1) * (helpers ? 1.3 : 1);
+    const pF = (0.006 + (100 - c.r.car) / 100 * 0.028) * (pocketQB ? 2.2 : 1) * (helpers ? 1.3 : 1) * (hasTrait(o.p, 'hard_hitter') ? 1.5 : 1) * (this.cfg.weather?.fumbleK ?? 1);
     if (!this.st.kneel && this.rng.chance(pF) && !((spot >= 100 && c.side === 'O') || (spot <= 0 && c.side === 'D'))) {
       return this.fumble(c, o, spot);
     }
@@ -815,6 +898,17 @@ function buildScrimmageResult(sim, outcome, spotX) {
     res.kind = 'penalty'; res.elapsed = 0; res.clockStops = true; res.desc = '';
     return res;
   }
+  if (st.spike) {
+    res.kind = 'pass'; res.outcome = 'incomplete'; res.spotX = los; res.clockStops = true;
+    res.desc = `${nm(sim.qb())} spikes the ball to stop the clock.`;
+    ev('pass', sim.qb().p, { att: 1 });
+    return res;
+  }
+  if (st.intSafety) {
+    res.kind = 'run'; res.safety = true; res.spotX = -1; res.clockStops = true;
+    res.desc = `${nm(sim.qb())} takes an intentional safety, running out of the back of the end zone.`;
+    return res;
+  }
   if (st.kneel) {
     res.kind = 'kneel';
     res.spotX = los - 1;
@@ -896,9 +990,14 @@ function buildScrimmageResult(sim, outcome, spotX) {
       return res;
     }
     res.kind = st.scramble ? 'scramble' : 'run';
-    ev('rush', carrier.p, { car: 1, yds, td: res.td ? 1 : 0, long: yds });
-    const gap = sim.run ? (Math.abs(sim.run.aim) > 5 ? (sim.run.dir > 0 ? 'left end' : 'right end') : Math.abs(sim.run.aim) > 1.5 ? (sim.run.dir > 0 ? 'left tackle' : 'right tackle') : 'up the middle') : dirWord(carrier.y);
-    res.desc = `${nm(carrier)} ${st.scramble ? 'scrambles' : 'runs'} ${gap} for ${yds === 0 ? 'no gain' : `${yds} yard${Math.abs(yds) === 1 ? '' : 's'}`}`;
+    if (sim.run?.kept) {
+      ev('rush', carrier.p, { car: 1, yds, td: res.td ? 1 : 0, long: yds });
+      res.desc = `${nm(carrier)} keeps it on the read option, ${sim.run.option.keepY > MID_Y ? 'left' : 'right'} end for ${yds === 0 ? 'no gain' : `${yds} yard${Math.abs(yds) === 1 ? '' : 's'}`}`;
+    } else {
+      ev('rush', carrier.p, { car: 1, yds, td: res.td ? 1 : 0, long: yds });
+      const gap = sim.run ? (Math.abs(sim.run.aim) > 5 ? (sim.run.dir > 0 ? 'left end' : 'right end') : Math.abs(sim.run.aim) > 1.5 ? (sim.run.dir > 0 ? 'left tackle' : 'right tackle') : 'up the middle') : dirWord(carrier.y);
+      res.desc = `${nm(carrier)} ${st.scramble ? 'scrambles' : 'runs'} ${gap} for ${yds === 0 ? 'no gain' : `${yds} yard${Math.abs(yds) === 1 ? '' : 's'}`}`;
+    }
   }
   // common endings for plays where the offense had the ball in the field of play
   if (res.td === 'O') { res.desc += ', TOUCHDOWN!'; res.clockStops = true; }

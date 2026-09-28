@@ -1,5 +1,6 @@
 import { RNG } from '../util/rng.js';
 import { FIRST_NAMES, LAST_NAMES, COACH_FIRST, FRANCHISES } from './names.js';
+import { rollTraits } from './traits.js';
 
 export const RATING_KEYS = [
   'spd', 'acc', 'agi', 'str', 'awr', 'thp', 'tha', 'cth', 'rte', 'btk', 'car',
@@ -89,6 +90,7 @@ export function generatePlayer(rng, pos, quality, usedNumbers) {
     id: '', first: rng.pick(FIRST_NAMES), last: rng.pick(LAST_NAMES), pos, num, height, weight, ratings,
   };
   p.ovr = computeOvr(p);
+  p.traits = rollTraits(rng, pos, p.ovr);
   return p;
 }
 

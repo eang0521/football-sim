@@ -1,4 +1,18 @@
 import { generateLeague, computeOvr } from './teamgen.js';
+import { rollTraits } from './traits.js';
+import { RNG } from '../util/rng.js';
+
+// Older saved leagues predate traits: give those players a deterministic set.
+function migrate(lg) {
+  lg.teams.forEach((t) => t.roster.forEach((p) => {
+    p.ovr = computeOvr(p);
+    if (!Array.isArray(p.traits)) {
+      let h = 0;
+      for (const ch of p.id) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+      p.traits = rollTraits(new RNG(h || 1), p.pos, p.ovr);
+    }
+  }));
+}
 
 const KEY = 'gridiron-sim-league-v1';
 
@@ -15,7 +29,7 @@ export function loadLeague() {
     try {
       const lg = JSON.parse(raw);
       if (lg && lg.version === 1 && Array.isArray(lg.teams)) {
-        lg.teams.forEach((t) => t.roster.forEach((p) => { p.ovr = computeOvr(p); }));
+        migrate(lg);
         return lg;
       }
     } catch { /* fall through */ }
@@ -35,6 +49,6 @@ export function exportLeagueJSON(league) { return JSON.stringify(league, null, 2
 export function importLeagueJSON(text) {
   const lg = JSON.parse(text);
   if (!lg || lg.version !== 1 || !Array.isArray(lg.teams) || lg.teams.length < 2) throw new Error('Invalid league file');
-  lg.teams.forEach((t) => t.roster.forEach((p) => { p.ovr = computeOvr(p); }));
+  migrate(lg);
   return lg;
 }

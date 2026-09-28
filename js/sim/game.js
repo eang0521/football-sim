@@ -3,10 +3,12 @@ import { RNG } from '../util/rng.js';
 import { clamp } from '../util/vec.js';
 import { PlaySim } from './playsim.js';
 import { callOffense, callDefense } from './playcaller.js';
+import { FORMATIONS } from './playbook.js';
 import { fgProbability } from './special.js';
 import { Stats } from './stats.js';
 import { depthChart } from '../data/teamgen.js';
 import { FOULS, rollPreSnap, enforce, stateValue, describeFoul } from './penalties.js';
+import { makeWeather, describeWeather, effectiveKickDist } from './weather.js';
 import { FIELD_W, MID_Y, HASH_L, HASH_R, QUARTER_LEN, OT_LEN } from './constants.js';
 
 const other = (k) => (k === 'home' ? 'away' : 'home');
@@ -33,6 +35,17 @@ export class Game {
     this.lastAbs = null;
     this.injuries = new Map(); // pid -> { team, p, part, status, returnAt, returned }
     this.snapCount = 0;
+    this.energy = new Map();   // pid -> 0..1 (fatigue)
+    this.snaps = new Map();    // pid -> snaps played on offense/defense
+    for (const t of [home, away]) for (const p of t.roster) this.energy.set(p.id, 1);
+    this.momentum = 0;         // -1 (away) .. +1 (home)
+    this.weather = makeWeather(opts.weather || 'random', this.rng);
+    const blankT = () => ({ run: { n: 0, s: 0 }, pass: { n: 0, s: 0 }, concept: {} });
+    this.tend = { home: blankT(), away: blankT() };  // in-game success by play type / concept
+    this.challenges = { home: 2, away: 2 };
+    this.preOut = opts.out || new Set(); // players already hurt coming into the game (season mode)
+    this.noTie = !!opts.noTie;           // playoff games keep playing overtime periods
+    this.addLog('info', `Weather: ${describeWeather(this.weather)}.`);
     this.addLog('info', `${this.teams[receiver].name} win the toss and will receive.`);
   }
 
@@ -78,15 +91,20 @@ export class Game {
     let cfg, meta;
     if (s.phase === 'kickoff') {
       const K = s.kicking, R = other(K);
-      cfg = { kind: 'kickoff', offTeam: this.teams[K], defTeam: this.teams[R], los: s.kickFrom, ballY: MID_Y };
-      meta = { type: 'kickoff', off: K, def: R, label: 'Kickoff' };
+      const diffK = s.score[K] - s.score[R];
+      let kickType = 'normal';
+      if (s.kickFrom === 35 && ((s.quarter >= 4 && diffK < 0 && diffK >= -16 && s.clock <= 180) || (s.quarter >= 4 && diffK <= -9 && diffK >= -16 && s.clock <= 330))) kickType = 'onside';
+      else if (s.kickFrom === 35 && s.quarter >= 4 && diffK < 0 && rng.chance(0.004)) kickType = 'onside';
+      else if ((s.quarter === 2 || s.quarter >= 4) && s.clock <= 22 && diffK >= 0) kickType = 'squib';
+      cfg = { kind: 'kickoff', offTeam: this.teams[K], defTeam: this.teams[R], los: s.kickFrom, ballY: MID_Y, kickType };
+      meta = { type: 'kickoff', off: K, def: R, label: kickType === 'onside' ? 'Onside Kick' : kickType === 'squib' ? 'Squib Kick' : 'Kickoff' };
     } else if (s.phase === 'pat') {
       const off = s.poss, def = other(off);
       const two = this.goForTwo(off);
       if (two) {
         const ctx = { ...this.ctxFor(off), down: 1, toGo: 2, ballOn: 98, isConversion: true };
-        const offCall = callOffense(this.teams[off], ctx, rng);
-        const defCall = callDefense(this.teams[def], { ...ctx, scoreDiff: -ctx.scoreDiff }, offCall, rng);
+        const offCall = callOffense(this.teams[off], ctx, rng, this.adapt(off));
+        const defCall = callDefense(this.teams[def], { ...ctx, scoreDiff: -ctx.scoreDiff }, offCall, rng, this.oppTend(off));
         cfg = { kind: 'scrimmage', offTeam: this.teams[off], defTeam: this.teams[def], offCall, defCall, los: 98, ballY: MID_Y, firstDownX: 100, ctx };
         meta = { type: 'conversion', off, def, offCall, defCall, label: `2-PT: ${offCall.name} vs ${defCall.name}` };
       } else {
@@ -99,30 +117,42 @@ export class Game {
       const defCtx = { ...ctx, scoreDiff: -ctx.scoreDiff, defPrevent: -ctx.scoreDiff > 3 && s.quarter >= 4 && s.clock < 150 };
       const decision = this.decide(off, ctx);
       const base = { offTeam: this.teams[off], defTeam: this.teams[def], los: s.ballOn, ballY: s.ballY };
+      const aggr = this.teams[off].coach.aggression;
+      const fakeOK = s.toGo <= 3 && !(s.quarter >= 4 && ctx.scoreDiff > 0);
       if (decision === 'punt') {
-        cfg = { ...base, kind: 'punt' };
-        meta = { type: 'punt', off, def, label: 'Punt' };
+        const fake = fakeOK && s.ballOn >= 25 && s.ballOn <= 60 && rng.chance(aggr * 0.09);
+        cfg = { ...base, kind: 'punt', fake };
+        meta = { type: 'punt', off, def, label: 'Punt', down: s.down, fake };
       } else if (decision === 'fg') {
-        cfg = { ...base, kind: 'fg', ballY: clamp(s.ballY, HASH_R, HASH_L) };
-        meta = { type: 'fg', off, def, label: `${Math.round(117 - s.ballOn)}-yd Field Goal` };
+        const fake = fakeOK && s.clock > 30 && rng.chance(aggr * 0.05);
+        cfg = { ...base, kind: 'fg', ballY: clamp(s.ballY, HASH_R, HASH_L), fake };
+        meta = { type: 'fg', off, def, label: `${Math.round(117 - s.ballOn)}-yd Field Goal`, fake };
       } else {
         let offCall, kind = 'scrimmage';
-        if (decision === 'kneel') {
+        const special = decision === 'kneel' || decision === 'spike' || decision === 'safety';
+        if (special) {
           kind = 'kneel';
-          offCall = { formation: 'singleback', flip: false, runDir: 1, name: 'QB Kneel',
-            play: { kind: 'run', id: 'kneel', name: 'Kneel', scheme: 'sneak', aim: 0, carrierSlot: 'QB' } };
-        } else offCall = callOffense(this.teams[off], ctx, rng);
-        const defCall = callDefense(this.teams[def], defCtx, offCall, rng);
+          const nm = decision === 'spike' ? 'Spike' : decision === 'safety' ? 'Intentional Safety' : s.quarter >= 4 ? 'Victory Formation' : 'QB Kneel';
+          offCall = { formation: decision === 'spike' ? 'gun_doubles' : 'singleback', flip: false, runDir: 1, name: nm,
+            play: { kind: 'run', id: 'kneel', name: nm, scheme: 'sneak', aim: 0, carrierSlot: 'QB' } };
+        } else offCall = callOffense(this.teams[off], ctx, rng, this.adapt(off));
+        const defCall = callDefense(this.teams[def], defCtx, offCall, rng, this.oppTend(off));
+        if (!special) offCall = this.maybeAudible(off, ctx, offCall, defCall) || offCall;
         const wantOOB = ctx.twoMin && ctx.scoreDiff <= 0 || (s.quarter === 2 && s.clock < 90);
-        cfg = { ...base, kind, offCall, defCall, firstDownX: s.ballOn + s.toGo, ctx: { ...ctx, wantOOB, oobSide: 'O' } };
+        cfg = { ...base, kind, offCall, defCall, firstDownX: s.ballOn + s.toGo, ctx: { ...ctx, wantOOB, oobSide: 'O' },
+          spike: decision === 'spike', intSafety: decision === 'safety' };
         meta = { type: kind === 'kneel' ? 'kneel' : 'scrimmage', off, def, offCall, defCall,
-          label: decision === 'kneel' ? 'QB Kneel' : `${offCall.name} vs ${defCall.name}`,
+          label: special ? offCall.name : `${offCall.name}${offCall.motion ? ' (motion)' : ''} vs ${defCall.name}`,
           down: s.down, toGo: s.toGo, ballOn: s.ballOn, fourth: s.down === 4 };
       }
     }
     meta.dir = this.dirOf(meta.off);
+    cfg.energy = this.energy;
+    cfg.weather = this.weather;
+    cfg.dir = meta.dir;
+    cfg.mod = (p, side) => this.ratingMod(p, side === 'O' ? meta.off : meta.def);
     // injured players sit; players whose injury window has passed return
-    cfg.unavailable = new Set();
+    cfg.unavailable = new Set(this.preOut);
     for (const [pid, inj] of this.injuries) {
       if (inj.returnAt > this.snapCount) cfg.unavailable.add(pid);
       else if (!inj.returned) {
@@ -156,6 +186,9 @@ export class Game {
     const q = s.quarter, diff = ctx.scoreDiff, clock = s.clock;
     // kneel to run out the clock
     const defTO = s.timeouts[other(off)];
+    if (s.spikeNext) { s.spikeNext = false; if (s.down < 4 && clock > 2) return 'spike'; }
+    // protect a late lead by conceding two points instead of punting from the end zone
+    if (q >= 4 && s.down === 4 && s.ballOn <= 6 && diff >= 3 && clock <= 45) return 'safety';
     if (q >= 4 && diff > 0) {
       const plays = 4 - s.down + 1;
       const burn = plays * 1.5 + (plays - 1) * 40 - Math.min(defTO, plays - 1) * 40;
@@ -163,7 +196,7 @@ export class Game {
     }
     if (q === 2 && clock <= 25 && s.ballOn < 55 && diff >= 0) return 'kneel';
     const fgDist = 117 - s.ballOn;
-    const pFG = fgProbability(this.kicker(off), fgDist);
+    const pFG = Math.max(0, fgProbability(this.kicker(off), effectiveKickDist(this.weather, fgDist, this.dirOf(off))) - this.weather.fgPen);
     // end-of-half kicks on any down
     if (clock <= 7 && pFG > 0.2 && (q === 2 || (q >= 4 && diff <= 0 && diff >= -3))) return 'fg';
     if (s.down < 4) return 'play';
@@ -201,12 +234,15 @@ export class Game {
     if (q === 1 || q === 3) {
       this.addLog('quarter', `End of ${qName(q)} quarter.`);
       s.quarter++; s.clock = this.qLen;
+      for (const [k, e] of this.energy) this.energy.set(k, Math.min(1, e + 0.08)); // quarter break
       if (s.quarter === 4) s.warned = false;
       return;
     }
     if (q === 2) {
       this.addLog('quarter', 'Halftime.');
+      this.halftimeAdjustments();
       s.quarter = 3; s.clock = this.qLen; s.timeouts = { home: 3, away: 3 }; s.warned = false;
+      for (const k of this.energy.keys()) this.energy.set(k, 1); // halftime
       s.phase = 'kickoff'; s.kicking = s.openingReceiver; s.kickFrom = 35;
       this.endDrive('Half');
       return;
@@ -220,6 +256,12 @@ export class Game {
       s.qScores.home.push(0); s.qScores.away.push(0);
       this.addLog('info', `${this.teams[rec].name} win the overtime toss and will receive.`);
       this.endDrive('End of regulation');
+      return;
+    }
+    if (q >= 5 && this.noTie && s.score.home === s.score.away) {
+      this.addLog('quarter', `End of ${qName(q)} — still tied. Another overtime period.`);
+      s.quarter++; s.clock = Math.min(OT_LEN, this.qLen * 2 / 3); s.warned = false;
+      s.qScores.home.push(0); s.qScores.away.push(0);
       return;
     }
     this.finish();
@@ -271,8 +313,11 @@ export class Game {
 
     const isConv = meta.type === 'conversion';
     this.snapCount++;
+    this.updateFatigue(sim);
     const injuryLogs = this.processInjuries(sim);
+    const reviewLogs = this.reviewPlay(sim);
     const pen = isConv ? { mode: 'none' } : this.resolveFouls(sim);
+    if (pen.mode !== 'nullify') this.learn(sim);
     if (!isConv && pen.mode !== 'nullify') this.stats.apply(res.events);
     let elapsed = res.elapsed;
     if (meta.type === 'kickoff' && res.touchback) elapsed = 0;
@@ -287,8 +332,13 @@ export class Game {
     let changed = false, scored = false;
     if (pen.mode === 'nullify') {
       s.ballOn = pen.state.ballOn; s.down = pen.state.down; s.toGo = pen.state.toGo; s.phase = 'scrimmage';
+      if (pen.offense && (s.quarter === 2 || s.quarter === 4) && clockBefore <= 60 && this.clockRunning) {
+        s.clock = Math.max(0, s.clock - 10);
+        pen.text += ' 10-second runoff.';
+      }
       if (pen.state.firstDown) T[off].firstDowns++;
       this.addLog('penalty', pen.text, { prefix, off, label: meta.label });
+      for (const l of reviewLogs) this.addLog('review', l);
       for (const l of injuryLogs) this.addLog('injury', l);
       if (this.drive) this.drive.plays++;
       return { text: pen.text, prefix };
@@ -298,7 +348,7 @@ export class Game {
 
     if (this.drive && meta.type !== 'xp' && !isConv && meta.type !== 'kickoff') this.drive.plays++;
 
-    switch (meta.type) {
+    switch (res.fake ? 'scrimmage' : meta.type) {
       case 'kickoff': {
         if (res.td) {
           const scorer = res.td === 'O' ? off : def;
@@ -341,7 +391,7 @@ export class Game {
       }
       default: { // scrimmage, kneel, punt
         const T0 = T[off];
-        if (meta.type === 'scrimmage' || meta.type === 'kneel') {
+        if (meta.type === 'scrimmage' || meta.type === 'kneel' || res.fake) {
           T0.plays++;
           const intercepted = res.events.some((e) => e.type === 'pass' && e.int);
           const gain = res.td === 'O' ? Math.round(100 - s.ballOn) : res.td === 'D' || intercepted ? 0 : Math.round(res.spotX - s.ballOn);
@@ -375,7 +425,7 @@ export class Game {
         }
         const newPoss = res.possession === 'O' ? off : def;
         const newBallOn = clamp(res.possession === 'O' ? res.spotX : 100 - res.spotX, 0.5, 99.5);
-        if (newPoss === off && meta.type !== 'punt') {
+        if (newPoss === off && (meta.type !== 'punt' || res.fake)) {
           const line = s.ballOn + s.toGo;
           if (newBallOn >= line) {
             s.down = 1; s.toGo = Math.min(10, 100 - newBallOn);
@@ -398,7 +448,7 @@ export class Game {
           s.poss = newPoss; s.ballOn = newBallOn; s.down = 1; s.toGo = Math.min(10, 100 - newBallOn);
           s.ballY = newY; changed = newPoss !== off;
           if (changed) {
-            this.endDrive(meta.type === 'punt' ? 'Punt' : res.kind === 'pass' && res.turnover ? 'INT' : 'Fumble');
+            this.endDrive(meta.type === 'punt' && !res.fake ? 'Punt' : res.kind === 'pass' && res.turnover ? 'INT' : 'Fumble');
             this.startDrive(newPoss, s.ballOn);
           }
         }
@@ -413,11 +463,14 @@ export class Game {
       this.countPenalty(def, y);
       text += ` PENALTY: ${describeFoul(f, this.teams[def])}, ${Math.round(y)} yard${Math.round(y) === 1 ? '' : 's'}${y < 15 ? ' (half the distance)' : ''}, automatic first down.`;
     } else if (pen.post) text += ` (${FOULS[pen.post.type].name} on ${this.teams[def].abbr} enforced on the kickoff.)`;
+    this.updateMomentum(sim, { scored, changed });
     this.addLog(scored ? 'score' : res.turnover ? 'turnover' : pen.flag ? 'penalty' : 'play', text, { prefix, off, label: meta.label });
+    for (const l of reviewLogs) this.addLog('review', l);
     for (const l of injuryLogs) this.addLog('injury', l);
 
     // ----- clock management between plays -----
     const q = s.quarter;
+    this.clockRunning = false;
     if ((q === 2 || q === 4) && !s.warned && clockBefore > 120 && s.clock <= 120 && s.clock > 0) {
       s.warned = true; this.addLog('info', 'Two-minute warning.');
     } else if (s.phase === 'scrimmage' && !res.clockStops && !changed && !scored && meta.type !== 'kickoff' && s.clock > 0
@@ -426,12 +479,216 @@ export class Game {
       if (!oobStops) this.runoff(res);
     }
     if (this.pendingFinal) { this.pendingFinal = false; this.finish(); }
-    else if (s.ot && s.clock <= 0 && s.phase !== 'pat') this.finish();
+    else if (s.ot && s.clock <= 0 && s.phase !== 'pat' && !(this.noTie && s.score.home === s.score.away)) this.finish();
     else if (s.ot && scored && s.phase === 'pat' && s.ot.ended.home + s.ot.ended.away >= 2 && s.score.home !== s.score.away) {
       // sudden death: TD ends it (no PAT needed)
       this.finish();
     }
     return { text, prefix };
+  }
+
+  // Pre-snap check: count the box and get out of a bad play.
+  maybeAudible(off, ctx, offCall, defCall) {
+    const rng = this.rng;
+    const qb = depthChart(this.teams[off]).QB[0];
+    const awr = qb ? qb.ratings.awr : 60;
+    const base = { base: 7, nickel: 6, dime: 5, goal: 8 }[defCall.front] ?? 6;
+    const shown = defCall.shownShell ?? 1;
+    const box = base + (shown === 1 ? 1 : 0) + (defCall.blitz?.length || 0) + (defCall.simPressure ? 1 : 0);
+    // blockers available in this formation: five linemen plus tight ends / fullback
+    const slots = Object.values(FORMATIONS[offCall.formation].slots);
+    const blockers = 5 + slots.filter((x) => x.pos === 'TE' || x.pos === 'FB').length;
+    const recognizes = rng.chance(0.25 + (awr - 60) / 80);
+    if (!recognizes || ctx.twoMin || offCall.play.id === 'kneel') return null;
+    let next = null;
+    if (offCall.play.kind === 'run' && !offCall.play.rpo && box >= blockers + 2 && ctx.toGo > 1) {
+      for (let i = 0; i < 8 && !next; i++) {
+        const c = callOffense(this.teams[off], { ...ctx, down: 3, toGo: 5 }, rng);
+        if (c.play.kind === 'pass' && c.play.depth !== 'deep' && c.play.forms.includes(offCall.formation)) next = { ...c, formation: offCall.formation, flip: offCall.flip };
+      }
+    } else if (offCall.play.kind === 'pass' && !offCall.play.screen && box <= blockers - 1 && ctx.toGo <= 4 && ctx.down >= 2) {
+      for (let i = 0; i < 8 && !next; i++) {
+        const c = callOffense(this.teams[off], { ...ctx, down: 1, toGo: 2, twoMin: false }, rng);
+        if (c.play.kind === 'run' && !c.play.option && c.play.forms.includes(offCall.formation)) next = { ...c, formation: offCall.formation, flip: offCall.flip };
+      }
+    }
+    if (!next) return null;
+    next.audible = true;
+    next.name = `${next.name} (audible from ${offCall.name})`;
+    return next;
+  }
+
+  // Momentum (+/-3 on mental ratings) and clutch play late in close games.
+  ratingMod(p, teamKey) {
+    const s = this.s;
+    let m = (teamKey === 'home' ? this.momentum : -this.momentum) * 3;
+    const close = s.quarter >= 4 && s.clock < 300 && Math.abs(s.score.home - s.score.away) <= 8;
+    if (close) {
+      if (p.traits && p.traits.includes('clutch')) m += 5;
+      else if (p.ratings.awr < 60) m -= 2;
+      if (teamKey === 'away') m -= 1; // road crowd at its loudest
+    }
+    return m;
+  }
+
+  updateMomentum(sim, { scored }) {
+    const res = sim.result, meta = sim.meta;
+    const sign = (k) => (k === 'home' ? 1 : -1);
+    const off = meta.off, def = other(off);
+    let d = 0;
+    if (res.td) d += 0.35 * sign(res.td === 'O' ? off : def);
+    else if (scored && meta.type === 'fg') d += 0.1 * sign(off);
+    if (res.turnover) d += 0.3 * sign(res.possession === 'D' ? def : off);
+    if (res.safety) d += 0.25 * sign(def);
+    if (res.kind === 'sack') d += 0.08 * sign(def);
+    if (meta.type === 'fg' && !res.good) d += 0.12 * sign(def);
+    const gain = res.possession === 'O' && !res.td ? res.spotX - (meta.pre?.ballOn ?? res.spotX) : 0;
+    if ((meta.type === 'scrimmage') && gain >= 20) d += 0.14 * sign(off);
+    if (meta.pre?.down === 4 && meta.type === 'scrimmage' && this.s.poss === def) d += 0.2 * sign(def);
+    this.momentum = clamp(this.momentum * 0.94 + d, -1, 1);
+  }
+
+  // Energy drains with effort and recovers on the sideline; halftime resets.
+  updateFatigue(sim) {
+    const onField = new Set();
+    const scrimmage = sim.meta.type === 'scrimmage' || sim.meta.type === 'conversion';
+    for (const a of sim.agents) {
+      onField.add(a.id);
+      const slow = (a.p.traits || []).some((t) => t === 'workhorse' || t === 'iron_man') ? 0.6 : 1;
+      const posK = { OL: 0.6, QB: 0.4, K: 0.2, P: 0.2 }[a.pos] ?? 1;
+      const drain = (0.008 + a.work * 0.045) * posK * slow;
+      this.energy.set(a.id, Math.max(0.3, (this.energy.get(a.id) ?? 1) - drain + 0.01));
+      if (scrimmage) this.snaps.set(a.id, (this.snaps.get(a.id) || 0) + 1);
+    }
+    for (const [pid, e] of this.energy) if (!onField.has(pid) && e < 1) this.energy.set(pid, Math.min(1, e + 0.05));
+  }
+
+  // ---------- in-game learning ----------
+  learn(sim) {
+    const meta = sim.meta, res = sim.result, pre = meta.pre;
+    if (meta.type !== 'scrimmage' || !meta.offCall || res.kind === 'penalty') return;
+    const gain = res.td === 'O' ? 99 : res.possession === 'O' ? res.spotX - pre.ballOn : -10;
+    const need = pre.down === 1 ? 0.4 : pre.down === 2 ? 0.6 : 1;
+    const ok = gain >= pre.toGo * need ? 1 : 0;
+    const T = this.tend[meta.off];
+    const k = meta.offCall.play.kind === 'run' && res.kind !== 'pass' ? 'run' : 'pass';
+    T[k].n++; T[k].s += ok;
+    const c = (T.concept[meta.offCall.play.id] ||= { n: 0, s: 0 });
+    c.n++; c.s += ok;
+  }
+
+  adapt(key) {
+    const T = this.tend[key];
+    const sr = (x) => (x.s + 2.2) / (x.n + 5); // shrink toward ~45% early
+    const passAdj = T.run.n + T.pass.n >= 12 ? clamp((sr(T.pass) - sr(T.run)) * 0.6, -0.12, 0.12) : 0;
+    const concept = {};
+    for (const [id, c] of Object.entries(T.concept)) if (c.n >= 2) concept[id] = clamp(1 + (sr(c) - 0.45) * 1.6, 0.55, 1.6);
+    return { passAdj, concept };
+  }
+
+  oppTend(key) {
+    const T = this.tend[key];
+    const n = T.run.n + T.pass.n;
+    const sr = (x) => (x.s + 2.2) / (x.n + 5);
+    return { n, passRate: n ? T.pass.n / n : 0.55, runSR: sr(T.run), passSR: sr(T.pass) };
+  }
+
+  halftimeAdjustments() {
+    for (const k of ['home', 'away']) {
+      const a = this.adapt(k), T = this.tend[k];
+      if (Math.abs(a.passAdj) < 0.04) continue;
+      const lean = a.passAdj > 0 ? 'the pass' : 'the run';
+      const sr = (x) => Math.round(100 * x.s / Math.max(1, x.n));
+      this.addLog('info', `Halftime adjustments: ${this.teams[k].name} will lean on ${lean} (run success ${sr(T.run)}%, pass success ${sr(T.pass)}%).`);
+    }
+  }
+
+  // ---------- officiating: close calls and replay review ----------
+  reviewPlay(sim) {
+    const res = sim.result, meta = sim.meta, s = this.s, rng = this.rng, st = sim.st;
+    if (!res || (meta.type !== 'scrimmage' && meta.type !== 'conversion') || res.kind === 'penalty') return [];
+    const off = meta.off, def = other(off);
+    const pre = meta.pre;
+    let call = null;
+    // 1) toe-tap catches along the sideline
+    if (res.kind === 'pass' && st.catcher && res.outcome !== 'incomplete' && !res.turnover && Math.min(st.catcher.y, FIELD_W - st.catcher.y) < 1.1 && rng.chance(0.15)) {
+      call = { what: 'catch', wrong: 'incomplete', hurt: off, apply: () => this.ruleIncomplete(res, sim) };
+    }
+    // 2) spot at the line to gain on 3rd/4th down
+    const line = pre.ballOn + pre.toGo;
+    if (!call && res.possession === 'O' && !res.td && pre.down >= 3 && Math.abs(res.spotX - line) < 0.5 && res.outcome !== 'incomplete' && rng.chance(0.18)) {
+      const made = res.spotX >= line;
+      const newSpot = made ? line - 0.2 : line + 0.1;
+      call = { what: made ? 'first down' : 'short', wrong: made ? 'short of the line' : 'a first down', hurt: made ? off : def, apply: () => this.respot(res, newSpot) };
+    }
+    // 3) goal-line plunges
+    if (!call && res.possession === 'O' && (res.td === 'O' || (res.spotX > 99.3 && res.spotX < 100 && !res.td)) && res.kind !== 'pass' && rng.chance(0.15)) {
+      const td = res.td === 'O';
+      call = { what: td ? 'touchdown' : 'short', wrong: td ? 'short of the goal line' : 'a touchdown', hurt: td ? off : def,
+        apply: () => (td ? this.respot(res, 99.6, true) : this.respot(res, 100, false, true)) };
+    }
+    // 4) fumble vs down by contact
+    if (!call && st.fumble?.lost && rng.chance(0.12)) {
+      call = { what: 'fumble', wrong: 'down by contact', hurt: def, apply: () => this.ruleDown(res, sim) };
+    }
+    if (!call) {
+      // a close play the officials got right: occasionally a coach challenges it anyway
+      const close = (res.kind === 'pass' && st.catcher && Math.min(st.catcher.y, FIELD_W - st.catcher.y) < 1.1)
+        || (res.possession === 'O' && pre.down >= 3 && Math.abs(res.spotX - line) < 0.6);
+      const team = res.kind === 'pass' && st.catcher ? def : (res.spotX >= line ? def : off);
+      if (close && rng.chance(0.18) && this.challenges[team] > 0 && s.timeouts[team] > 0 && !(s.clock <= 120 && (s.quarter === 2 || s.quarter >= 4))) {
+        this.challenges[team]--; s.timeouts[team]--;
+        return [`${this.teams[team].abbr} challenges the ruling... after review, the ruling on the field STANDS. ${this.teams[team].abbr} loses a timeout.`];
+      }
+      return [];
+    }
+    // The officials get it wrong on the field...
+    const truth = JSON.stringify(res);
+    call.apply();
+    const logs = [`Ruled ${call.wrong} on the field.`];
+    const scoringOrTO = res.td || call.what === 'touchdown' || call.what === 'fumble' || res.turnover;
+    const booth = scoringOrTO || s.clock <= 120 && (s.quarter === 2 || s.quarter >= 4);
+    const overturn = rng.chance(0.7); // is the video conclusive?
+    const revert = () => { Object.assign(res, JSON.parse(truth)); };
+    if (booth) {
+      logs.push(`The play is under booth review... ${overturn ? `REVERSED: ${call.what}.` : 'the ruling STANDS.'}`);
+      if (overturn) revert();
+      return logs;
+    }
+    const team = call.hurt;
+    const lev = pre.down >= 3 || call.what === 'touchdown' ? 0.85 : 0.6;
+    if (this.challenges[team] > 0 && s.timeouts[team] > 0 && rng.chance(lev)) {
+      this.challenges[team]--;
+      logs.push(`${this.teams[team].abbr} throws the challenge flag... ${overturn ? `REVERSED: ${call.what}.` : `the ruling STANDS. ${this.teams[team].abbr} loses a timeout.`}`);
+      if (overturn) revert(); else s.timeouts[team]--;
+    }
+    return logs;
+  }
+
+  ruleIncomplete(res, sim) {
+    res.kind = 'pass'; res.outcome = 'incomplete'; res.spotX = sim.los; res.td = null; res.clockStops = true; res.oob = false;
+    res.events = res.events.filter((e) => e.type === 'pass' || e.type === 'rec').map((e) => (e.type === 'pass' ? { type: 'pass', pid: e.pid, att: 1 } : { type: 'rec', pid: e.pid, tgt: 1 }));
+    res.desc = `${res.desc.split(' for ')[0].replace(' pass ', ' pass incomplete ')} (ruled out of bounds).`;
+  }
+
+  respot(res, spot, removeTD, makeTD) {
+    const d = Math.round(spot) - Math.round(res.td === 'O' ? 100 : res.spotX);
+    res.spotX = spot;
+    if (removeTD) { res.td = null; res.clockStops = false; res.desc = res.desc.replace(', TOUCHDOWN!', ', short of the goal line.'); }
+    if (makeTD) { res.td = 'O'; res.clockStops = true; res.desc += ' TOUCHDOWN!'; }
+    for (const e of res.events) {
+      if ((e.type === 'rush' || e.type === 'pass' || e.type === 'rec') && e.yds != null) {
+        e.yds += d;
+        if (removeTD) e.td = 0;
+        if (makeTD) e.td = 1;
+      }
+    }
+  }
+
+  ruleDown(res) {
+    res.possession = 'O'; res.turnover = false; res.clockStops = false;
+    res.events = res.events.filter((e) => e.type !== 'fum' && !(e.type === 'def' && (e.ff || e.fr)));
+    res.desc = res.desc.replace(/ FUMBLE.*$/, ' Ruled down by contact.');
   }
 
   countPenalty(key, yds) {
@@ -482,8 +739,9 @@ export class Game {
       const f = live[0];
       const st = enforce(f, pre);
       this.countPenalty(teamOf(f.side), st.moved);
+      const offenseFoul = f.side === 'O';
       const dn = st.firstDown ? 'First down' : `Replay ${['', '1st', '2nd', '3rd', '4th'][st.down]} down`;
-      return { mode: 'nullify', state: st, flag: true,
+      return { mode: 'nullify', state: st, flag: true, offense: offenseFoul,
         text: `PENALTY: ${describeFoul(f, this.teams[teamOf(f.side)])}, ${yardsWord(st.moved)}${st.halfDist ? ' (half the distance)' : ''}. ${dn}.` };
     }
     const offF = live.filter((f) => f.side === 'O'), defF = live.filter((f) => f.side === 'D');
@@ -499,7 +757,7 @@ export class Game {
       const accept = stateValue(penSt) < stateValue(playSt); // defense picks what hurts the offense most
       if (!accept) return { mode: 'declined', flag: true, post: postF, suffix: `(${FOULS[f.type].name} on ${this.teams[off].abbr} declined.)` };
       this.countPenalty(off, penSt.moved);
-      return { mode: 'nullify', state: penSt, flag: true,
+      return { mode: 'nullify', state: penSt, flag: true, offense: true,
         text: `${res.td === 'O' ? 'TOUCHDOWN NULLIFIED. ' : ''}${res.desc} PENALTY: ${describeFoul(f, this.teams[off])}, ${yardsWord(penSt.moved)}. No play.` };
     }
     if (defF.length) {
@@ -555,8 +813,14 @@ export class Game {
     if ((q === 2 || q === 4) && !s.warned && s.clock > 120 && s.clock - r <= 120) {
       s.clock = 120; s.warned = true; this.addLog('info', 'Two-minute warning.'); return;
     }
+    // hurry-up with no timeouts to burn: rush to the line and spike it
+    const hurry = (q === 2 && s.clock <= 60 && s.ballOn >= 35) || (q >= 4 && ctx.scoreDiff <= 0 && ctx.scoreDiff >= -16 && s.clock <= 120);
+    if (hurry && s.down <= 3 && s.timeouts[offK] === 0 && s.clock > 8 && s.clock <= 45 && s.ballOn >= 35 && this.rng.chance(0.65)) {
+      r = 6 + this.rng.range(0, 3); s.spikeNext = true;
+    }
     const before = s.clock;
     s.clock = Math.max(0, s.clock - r);
+    this.clockRunning = true;
     if (this._topOff) this.stats.team[this._topOff].top += before - s.clock;
   }
 

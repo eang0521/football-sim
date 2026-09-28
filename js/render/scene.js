@@ -184,6 +184,47 @@ export class FieldRenderer {
     this.labels.clear();
   }
 
+  setWeather(w) {
+    if (this.precip) { this.scene.remove(this.precip); this.precip.geometry.dispose(); this.precip = null; }
+    this.weather = w;
+    const dark = w && (w.type === 'rain' || w.type === 'snow');
+    const sky = w?.type === 'snow' ? 0x3a4250 : dark ? 0x1b222c : 0x0d1624;
+    this.scene.background = new THREE.Color(sky);
+    this.scene.fog = new THREE.Fog(sky, dark ? 70 : 160, dark ? 240 : 380);
+    this.sun.intensity = dark ? 1.3 : 2.1;
+    if (!w || (w.type !== 'rain' && w.type !== 'snow')) return;
+    const snow = w.type === 'snow';
+    const N = snow ? 6000 : 9000;
+    const pos = new Float32Array(N * 3);
+    for (let i = 0; i < N; i++) {
+      pos[i * 3] = (Math.random() - 0.5) * 180;
+      pos[i * 3 + 1] = Math.random() * 45;
+      pos[i * 3 + 2] = (Math.random() - 0.5) * 120;
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
+    const m = new THREE.PointsMaterial({ color: snow ? 0xffffff : 0xa9c4e8, size: snow ? 0.35 : 0.14, transparent: true, opacity: snow ? 0.9 : 0.55, depthWrite: false });
+    this.precip = new THREE.Points(g, m);
+    this.precip.userData = { snow, vy: snow ? -2.2 : -24, wx: Math.cos(w.windDir) * w.windMph * (snow ? 0.12 : 0.25), wz: -Math.sin(w.windDir) * w.windMph * (snow ? 0.12 : 0.25) };
+    this.scene.add(this.precip);
+  }
+
+  animatePrecip(dt) {
+    const P = this.precip;
+    if (!P) return;
+    const a = P.geometry.attributes.position, u = P.userData;
+    const arr = a.array;
+    for (let i = 0; i < arr.length; i += 3) {
+      arr[i] += u.wx * dt + (u.snow ? Math.sin(arr[i + 1] + i) * 0.4 * dt : 0);
+      arr[i + 1] += u.vy * dt;
+      arr[i + 2] += u.wz * dt;
+      if (arr[i + 1] < 0) { arr[i + 1] = 45; arr[i] = (Math.random() - 0.5) * 180; arr[i + 2] = (Math.random() - 0.5) * 120; }
+      if (arr[i] > 90) arr[i] -= 180; else if (arr[i] < -90) arr[i] += 180;
+      if (arr[i + 2] > 60) arr[i + 2] -= 120; else if (arr[i + 2] < -60) arr[i + 2] += 120;
+    }
+    a.needsUpdate = true;
+  }
+
   meshFor(agent, team) {
     let m = this.players.get(agent.id);
     if (!m) {
@@ -288,6 +329,7 @@ export class FieldRenderer {
 
   // Per-frame update from sim state
   update(sim, game, dt, now) {
+    this.animatePrecip(Math.min(dt, 0.05));
     if (!sim || !this.teams) { this.renderer.render(this.scene, this.camera); return; }
     const dir = sim.meta.dir;
     const offTeam = this.teams[sim.meta.off], defTeam = this.teams[sim.meta.def];

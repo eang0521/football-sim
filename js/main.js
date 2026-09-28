@@ -4,6 +4,7 @@ import { loadLeague, saveLeague } from './data/storage.js';
 import { teamRatings } from './data/teamgen.js';
 import { Hud, renderBoxScore, readable, shade } from './ui/hud.js';
 import { TeamEditor } from './ui/editor.js';
+import { SeasonUI } from './ui/seasonui.js';
 import { DT } from './sim/constants.js';
 
 const $ = (id) => document.getElementById(id);
@@ -23,10 +24,17 @@ const S = {
 
 // ---------------- Game flow ----------------
 function startGame(home, away, opts) {
-  S.game = new Game(home, away, opts);
+  S.onFinal = null; // exhibition game: nothing to report back
+  attachGame(new Game(home, away, opts));
+}
+
+function attachGame(game) {
+  const home = game.teams.home, away = game.teams.away;
+  S.game = game;
   S.sim = null; S.acc = 0; S.waiting = false; S.overShown = false;
   S.lastShown = S.game.s.clock; S.lastQ = 1;
   renderer.setTeams(home, away);
+  renderer.setWeather(S.game.weather);
   hud.reset(S.game);
   setPaused(false);
   window.__game = S.game; // handy for debugging in the console
@@ -138,6 +146,7 @@ function onGameOver() {
   hud.update(); hud.syncLog();
   const g = S.game, s = g.s;
   hud.toast(`FINAL: ${g.teams.away.abbr} ${s.score.away} – ${g.teams.home.abbr} ${s.score.home}`, 5000);
+  if (S.onFinal) { const f = S.onFinal; S.onFinal = null; f(); }
   setTimeout(() => openBox(), 1200);
 }
 
@@ -207,6 +216,17 @@ function openBox() {
 }
 $('btn-box').addEventListener('click', openBox);
 $('btn-teams').addEventListener('click', () => { editor.render(); openModal('modal-teams'); });
+const seasonUI = new SeasonUI($('season-body'), {
+  getLeague: () => league,
+  toast: (m) => hud.toast(m, 4000),
+  watch: (game, onDone) => {
+    closeModal('modal-season');
+    attachGame(game);
+    S.onFinal = onDone; // record the result when the final whistle blows
+    hud.toast(`Season ${seasonUI.season.year}: ${game.teams.away.abbr} @ ${game.teams.home.abbr}`);
+  },
+});
+$('btn-season').addEventListener('click', () => { seasonUI.render(); openModal('modal-season'); });
 $('btn-new').addEventListener('click', () => { fillTeamSelects(); openModal('modal-new'); });
 $('ng-cancel').addEventListener('click', () => { if (S.game) closeModal('modal-new'); });
 
@@ -245,6 +265,7 @@ $('ng-start').addEventListener('click', () => {
   closeModal('modal-new');
   startGame(league.teams[hi], league.teams[ai], {
     quarterLen: +$('ng-qlen').value,
+    weather: $('ng-weather').value,
     seed: seedV === '' ? undefined : +seedV,
   });
 });

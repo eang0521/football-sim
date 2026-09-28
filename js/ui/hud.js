@@ -38,6 +38,13 @@ export class Hud {
     }
     $('sb-q').textContent = s.final ? 'FINAL' : qName(s.quarter);
     $('sb-time').textContent = s.final ? '' : fmtClock(displayClock ?? s.clock);
+    const mo = $('momentum');
+    if (mo) {
+      mo.querySelector('.mo-away').style.background = g.teams.away.colors.primary;
+      mo.querySelector('.mo-home').style.background = g.teams.home.colors.primary;
+      mo.querySelector('i').style.left = `${50 + (g.momentum || 0) * 50}%`;
+      mo.title = `Momentum: ${Math.abs(g.momentum || 0) < 0.1 ? 'even' : (g.momentum > 0 ? g.teams.home.abbr : g.teams.away.abbr)}`;
+    }
     const dn = $('sb-down');
     dn.classList.remove('flag');
     if (s.final) dn.textContent = s.score.home === s.score.away ? 'TIE' : `${g.teams[s.score.home > s.score.away ? 'home' : 'away'].abbr} WIN`;
@@ -175,13 +182,22 @@ export function renderBoxScore(game) {
       ['pass', 'rush', 'rec', 'def', 'kick', 'punt', 'ret'].map((c) => `<div class="box-sec">${table(k, c)}</div>`).join('') + '</div>';
   };
   const inj = [...(game.injuries?.values() || [])];
+  const order = ['QB', 'RB', 'FB', 'WR', 'TE', 'OL', 'DE', 'DT', 'LB', 'CB', 'S'];
+  const snapHtml = (k) => {
+    const rows = game.teams[k].roster.filter((p) => game.snaps?.get(p.id))
+      .sort((a, b) => order.indexOf(a.pos) - order.indexOf(b.pos) || game.snaps.get(b.id) - game.snaps.get(a.id));
+    if (!rows.length) return '';
+    return `<div class="box-sec"><h3>${esc(game.teams[k].abbr)} snap counts</h3><div class="snaps">${rows.map((p) =>
+      `<div><span>${p.num} ${esc(p.first[0])}. ${esc(p.last)}<span class="pos">${p.pos}</span></span><b>${game.snaps.get(p.id)}</b></div>`).join('')}</div></div>`;
+  };
   const injHtml = inj.length ? `<div class="box-sec"><h3>Injuries</h3><div class="injlist">${inj.map((i) => {
     const t = game.teams[i.team];
     const back = i.returnAt !== Infinity && game.snapCount >= i.returnAt;
     return `<div><i class="swatch" style="background:${t.colors.primary}"></i> ${esc(t.abbr)} #${i.p.num} ${esc(i.p.first[0])}. ${esc(i.p.last)} (${i.p.pos}) — ${i.part}, ` +
       `<span class="${i.returnAt === Infinity ? 'out' : ''}">${back ? 'returned' : i.returnAt === Infinity ? 'out for the game' : 'out'}</span> <span style="color:var(--muted)">(Q${Math.min(i.q, 4)})</span></div>`;
   }).join('')}</div></div>` : '';
-  return `${line}<div class="box-sec"><h3>Team stats</h3>${teamStats}</div>${injHtml}<div class="box-top">${side('away')}${side('home')}</div>`;
+  return `${line}<div class="box-sec"><h3>Team stats</h3>${teamStats}</div>${injHtml}<div class="box-top">${side('away')}${side('home')}</div>` +
+    `<div class="box-top">${snapHtml('away')}${snapHtml('home')}</div>`;
 }
 
 function rating(r) {

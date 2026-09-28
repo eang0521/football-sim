@@ -2,6 +2,7 @@
 // and optionally agent.faceTo. Physics lives in playsim.js.
 import { clamp, dist, norm, pointSegDist } from '../util/vec.js';
 import { FIELD_W, MID_Y, GRAVITY, DT } from './constants.js';
+import { hasTrait } from '../data/traits.js';
 
 const OL_SLOTS = new Set(['LT', 'LG', 'C', 'RG', 'RT']);
 export const attackDir = (a) => (a.side === 'O' ? 1 : -1);
@@ -128,7 +129,7 @@ function runnerThink(sim, a) {
     if (dx > 0 && d < 2.0 && !R.juked?.[o.uid]) {
       R.juked = R.juked || {};
       R.juked[o.uid] = true;
-      const p = 0.03 + Math.max(0, (a.r.agi + a.r.btk) / 200 - 0.65) * 0.4 - Math.max(0, o.r.awr - 70) / 800;
+      const p = (0.03 + Math.max(0, (a.r.agi + a.r.btk) / 200 - 0.65) * 0.4 - Math.max(0, o.r.awr - 70) / 800) * (hasTrait(a.p, 'elusive') ? 1.6 : 1);
       if (sim.rng.chance(p)) {
         o.d.jukedT = sim.t;
         o.stun = Math.max(o.stun, 0.35);
@@ -164,14 +165,23 @@ export function predictRoutePos(r, T) {
           want = Math.min(want, Math.sqrt(cutSpd * cutSpd + 2 * r.acc * 1.8 * d));
         }
       }
-      if (d < 0.7 || (nxt && d < 1.2)) { i++; continue; }
+      if (d < 0.7 || (nxt && d < 1.2)) {
+        // turning into the next leg costs speed (hips have to come around)
+        if (nxt) {
+          const sp0 = Math.hypot(vx, vy) || 1, dl = Math.hypot(nxt.x - tx, nxt.y - ty) || 1;
+          const c = (vx * (nxt.x - tx) + vy * (nxt.y - ty)) / (sp0 * dl);
+          const k = 0.55 + 0.45 * Math.max(0, c);
+          vx *= k; vy *= k;
+        }
+        i++; continue;
+      }
       if (R.sit && !nxt) want = Math.min(want, Math.sqrt(2 * r.acc * 1.3 * d));
     } else if (R.sit) { break; }
     else { const sp = Math.hypot(vx, vy) || 1; tx = x + vx / sp * 10; ty = y + vy / sp * 10; }
     const d = Math.hypot(tx - x, ty - y) || 1;
     const dvx = (tx - x) / d * want - vx, dvy = (ty - y) / d * want - vy;
     const sp = Math.hypot(vx, vy);
-    const amax = r.acc * (1 - 0.45 * sp / r.maxSpd) * dt * 1.4;
+    const amax = r.acc * (1 - 0.55 * sp / r.maxSpd) * dt * 0.95;
     const dl = Math.hypot(dvx, dvy);
     const k = dl > amax ? amax / dl : 1;
     vx += dvx * k; vy += dvy * k;
@@ -261,6 +271,20 @@ function qbPass(sim, qb) {
     P.minRead = P.drop === 'quick' ? 0.6 : P.drop === '5' ? 1.35 : 1.8;
     if (P.pa) P.minRead += 0.45;
     P.hot = sim.def.filter((d) => d.role === 'rush').length >= 6;
+    if (sim.disguised) {
+      // the post-snap picture isn't what he saw pre-snap: slower, noisier reads (awareness helps)
+      P.readBonus = (P.readBonus || 1) * (1.45 - qb.r.awr / 250);
+      P.minRead += 0.12;
+    }
+    if (P.tell) {
+      // vs man: crossers and breaking routes first; vs zone: settle-in routes in the windows
+      const pref = P.tell === 'man' ? ['cross', 'drag', 'drag6', 'slant', 'out', 'quickout', 'corner', 'post', 'dig']
+        : ['curl', 'hook', 'stick', 'hitch', 'dig', 'in5', 'snag', 'flat', 'seam'];
+      const rank = (l) => { const r = sim.bySlotO[l]?.d.route?.name; const i = pref.indexOf(r); return i < 0 ? 99 : i; };
+      const first = P.prog.slice(0, 3).sort((a, b) => rank(a) - rank(b));
+      P.prog = [...first, ...P.prog.slice(3)];
+      P.readBonus = 0.9;
+    }
     if (P.hot) P.minRead = Math.min(P.minRead, 0.7);
   }
   if (P.throwing) { goTo(qb, qb.x, qb.y, 0.5); return; }
@@ -283,12 +307,25 @@ function qbPass(sim, qb) {
     P.pressure = pressure;
     P.nearD = nd;
   }
+  if (P.screen && !sim.noThrow) {
+    // screen: throw on timing, over the rush; dump it if the screen is smothered
+    const S = P.screen;
+    if (t < S.throwT) return;
+    const r = S.target;
+    const ev = evaluateTarget(sim, qb, r);
+    const smothered = sim.def.some((d) => !d.down && !d.blockers.length && Math.hypot(d.x - r.x, d.y - r.y) < 1.2);
+    if (ev && !ev.notReady && !smothered) { P.path = 'screen'; return startThrow(sim, qb, ev); }
+    if (t > S.throwT + 0.6) { if (smothered && ev && !ev.notReady && sim.rng.chance(0.5)) return startThrow(sim, qb, ev); return throwAway(sim, qb); }
+    return;
+  }
   if (t < P.minRead - 0.1 || sim.noThrow) return;
   if (t - P.lastEval < 0.1) return;
   P.lastEval = t;
   const prog = P.prog.map((l) => sim.bySlotO[l]).filter(Boolean);
   const readTime = 0.62 - qb.r.awr * 0.0025;
-  const noise = () => sim.rng.normal(0, 0.28 * (1.12 - qb.r.awr / 100));
+  const style = hasTrait(qb.p, 'gunslinger') ? -0.12 : hasTrait(qb.p, 'game_manager') ? 0.08 : 0;
+  const calm = hasTrait(qb.p, 'pocket_passer') ? 0.85 : 1;
+  const noise = () => sim.rng.normal(0, 0.5 * (1.15 - qb.r.awr / 100) * (P.readBonus || 1) * calm);
   const pressure = P.pressure || 0;
   // awareness sets how early the QB feels the rush
   const underDuress = P.ttc < 0.35 + qb.r.awr / 250 || P.nearD < 1.6;
@@ -301,9 +338,9 @@ function qbPass(sim, qb) {
     let ev = evaluateTarget(sim, qb, r);
     const waiting = ev && ev.notReady;
     if (waiting) ev = null;
-    let thr = (P.drop === 'quick' ? 0.38 : 0.62) - timeSet * 0.1 - pressure * 0.25;
+    let thr = (P.drop === 'quick' ? 0.24 : 0.46) + style - timeSet * 0.1 - pressure * 0.25;
     if (ev && sim.ctx?.down >= 3 && ev.c.x < toGoX - 0.3 && P.ri < prog.length - 1) thr += 0.3;
-    if (ev && ev.c.x - sim.los > 18) thr += 0.5 + (ev.c.x - sim.los - 18) * 0.03;
+    if (ev && ev.c.x - sim.los > 18) thr += (sim.cfg.weather?.windMph ?? 0) * 0.01 + (0.5 + (ev.c.x - sim.los - 18) * 0.03) * (hasTrait(qb.p, 'gunslinger') ? 0.6 : hasTrait(qb.p, 'game_manager') ? 1.4 : 1);
     if (ev && ev.score + noise() > thr) { P.path = 'read'; return startThrow(sim, qb, ev); }
     // hold on a primary read that hasn't broken yet (up to a point)
     if (!(waiting && P.ri === 0 && timeSet < 1.2)) P.readT += 0.1;
@@ -318,7 +355,9 @@ function qbPass(sim, qb) {
       const ev = evaluateTarget(sim, qb, r);
       if (!ev || ev.notReady) continue;
       const air = ev.c.x - los;
-      const val = ev.score + noise() + Math.min(air, 15) * 0.03 - Math.max(0, air - 18) * 0.05;
+      let val = ev.score + noise() + Math.min(air, 15) * 0.03 - Math.max(0, air - 18) * 0.05;
+      // on 3rd/4th down a throw that reaches the marker is worth more than a safe checkdown
+      if (sim.ctx?.down >= 3) val += ev.c.x >= toGoX - 0.5 ? 0.22 : -0.12;
       if (!best || val > best.val) best = { ...ev, val };
     }
     const need = underDuress ? 0.25 : 0.15 - (timeSet - 1.5) * 0.07;
@@ -328,7 +367,8 @@ function qbPass(sim, qb) {
       if (P.escapeT && sim.t < P.escapeT) return;
       P.escapeT = sim.t + 0.35;
       const lane = scrambleLane(sim, qb);
-      if (lane > 0.5 && sim.rng.chance(0.2 + qb.r.spd / 300)) {
+      const scr = hasTrait(qb.p, 'scrambler') ? 2 : hasTrait(qb.p, 'pocket_passer') ? 0.3 : 1;
+      if (lane > 0.5 && sim.rng.chance((0.2 + qb.r.spd / 300) * scr)) {
         qb.d.scramble = true; sim.startRun(qb); sim.note('scramble', qb); return;
       }
       if (sim.rng.chance(0.08 + qb.r.awr / 500) || timeSet > 4.5) return throwAway(sim, qb);
@@ -392,7 +432,8 @@ function qbRun(sim, qb) {
     }
     return;
   }
-  const meshT = R.scheme === 'draw' ? 0.85 : qb.x > sim.los - 2 ? 0.65 : 0.45;
+  // option plays ride the mesh longer while the QB reads his key
+  const meshT = R.scheme === 'draw' ? 0.85 : (R.option || R.rpo) ? 0.95 : qb.x > sim.los - 2 ? 0.65 : 0.45;
   if (!R.mesh) {
     const uc = qb.x > sim.los - 2;
     R.mesh = R.scheme === 'draw'
@@ -400,7 +441,40 @@ function qbRun(sim, qb) {
       : { x: uc ? sim.los - 4 : qb.x + 0.2, y: qb.y + R.dir * (uc ? 0.9 : 0.6) };
   }
   goTo(qb, R.mesh.x, R.mesh.y - R.dir * 0.5, qb.maxSpd * 0.7);
+  // RPO: if the overhang defender fills against the run, pull it and throw the quick route
+  if (R.rpo && !R.rpoDone && sim.t > 0.35) {
+    const k = R.rpo.key, r = R.rpo.r;
+    const fills = k && k.x < R.rpo.keyX0 - 0.8 && k.vx < -2;
+    const read = sim.rng.normal(0, 0.25 * (1.1 - qb.r.awr / 100));
+    if (fills || read > 0.45) {
+      const ev = r.d.route.idx >= 1 || r.d.route.name === 'bubble' ? evaluateTarget(sim, qb, r) : null;
+      if (ev && !ev.notReady && ev.score > -0.3) {
+        R.rpoDone = true; R.handed = true;
+        sim.pass.path = 'rpo';
+        sim.note('rpo_pass', qb, k);
+        return startThrow(sim, qb, ev);
+      }
+    }
+    if (sim.t > meshT * 0.6) R.rpoDone = true;
+  }
   if (sim.t > meshT * 0.6 && rb && Math.hypot(rb.x - qb.x, rb.y - qb.y) < 1.3 && !R.handed) {
+    // Read option: keep it if the unblocked end crashes on the dive
+    const O = R.option;
+    if (O && !O.decided) {
+      O.decided = true;
+      const k = O.key;
+      // read what the end actually does: flattening down the line toward the dive = crash
+      const crashing = Math.abs(k.y - rb.y) < Math.abs(k.ay - rb.y) - 0.8;
+      const misread = sim.rng.chance(0.18 * (1.1 - qb.r.awr / 100));
+      if (crashing !== misread) {
+        R.handed = true; R.kept = true;
+        k.d.fooledUntil = sim.t + 0.45; // committed to the dive
+        k.tackleCD = sim.t + 0.45;
+        sim.note('keep', qb, k);
+        sim.startRun(qb, { hole: { x: sim.los + 2, y: O.keepY } });
+        return;
+      }
+    }
     R.handed = true; R.handoffT = sim.t;
     sim.handoff(qb, rb);
   }
@@ -487,6 +561,17 @@ function blockTarget(sim, a, d, protect, opts = {}) {
 function passBlock(sim, a) {
   const qb = sim.qb();
   if (!qb) return;
+  if (a.d.screenRelease != null && sim.t >= a.d.screenRelease) {
+    // screen: let the rusher go and get out in front
+    if (a.engaged) { a.noBlock[a.engaged.uid] = sim.t + 5; sim.release(a); }
+    a.d.blockOn = null;
+    const sp = a.d.screenSpot;
+    const threat = nearestDefenderTo(sim, sp, 6);
+    if (threat && Math.hypot(sp.x - a.x, sp.y - a.y) < 2) return blockTarget(sim, a, threat, sim.pass.screen.target);
+    goTo(a, sp.x, sp.y, a.maxSpd * 0.9, true);
+    a.faceTo = { x: sp.x + 5, y: sp.y };
+    return;
+  }
   let t = a.d.blockOn;
   if (a.engaged) return; // physics drives engaged pairs
   if (!t || t.down || t.stun > 0.3 || (t.blockers.length >= 1 && !t.blockers.includes(a)) || a.noBlock[t.uid] > sim.t
@@ -502,6 +587,16 @@ function passBlock(sim, a) {
     return;
   }
   blockTarget(sim, a, t, qb, { maxX: sim.los + 0.3, minX: qb.x + 0.8 });
+}
+
+function nearestDefenderTo(sim, p, radius) {
+  let best = null, bd = radius;
+  for (const d of sim.def) {
+    if (d.down || d.blockers.length) continue;
+    const dd = Math.hypot(d.x - p.x, d.y - p.y);
+    if (dd < bd) { bd = dd; best = d; }
+  }
+  return best;
 }
 
 function pickRusher(sim, a, qb) {
@@ -594,6 +689,13 @@ function escortBlock(sim, a, c) {
 function rushThink(sim, a) {
   const c = sim.carrierAgent();
   const qb = sim.qb();
+  // read-option key: crash the dive or squeeze and play the QB
+  if (a.d.optionKey && sim.run && (!sim.run.handed || (sim.run.kept && sim.t < (a.d.fooledUntil || 0)))) {
+    const rb = sim.bySlotO[sim.cfg.offCall.play.carrierSlot || 'F'];
+    if (a.d.crash && rb) goTo(a, rb.x + 0.5, rb.y, a.maxSpd, false);
+    else goTo(a, sim.los + 0.5, sim.run.option ? sim.run.option.keepY * 0.6 + a.y * 0.4 : a.y, a.maxSpd * 0.6, true);
+    return;
+  }
   if (sim.runRead(a)) return pursue(sim, a, c);
   const target = c || qb;
   if (!target) return;
@@ -693,10 +795,18 @@ function ballReact(sim, a) {
   const tArr = info.t0 + info.T;
   const land = info.land;
   if (a === info.target) {
-    // run through the catch point rather than stopping at it
-    const d = Math.hypot(land.x - a.x, land.y - a.y), tLeft = Math.max(0.05, tArr - sim.t);
-    const need = d / tLeft;
-    goTo(a, land.x, land.y, Math.min(a.maxSpd, Math.max(need * 1.1, 3)), false);
+    // Work to the ball: the earliest point on its flight that is catchable (chest to over-the-head)
+    // and that we can reach in time. Fall back to the aim point.
+    const sp = Math.hypot(a.vx, a.vy);
+    let aim = land;
+    for (let t = 0.05; t < 2.5; t += 0.05) {
+      const bx = B.x + B.vx * t, by = B.y + B.vy * t, bz = B.z + B.vz * t - 0.5 * GRAVITY * t * t;
+      if (bz < 0.3) break;
+      if (bz > 2.4) continue;
+      const reach = Math.min(a.maxSpd * t, sp * t + 0.5 * a.acc * t * t) + 0.9;
+      if (Math.hypot(bx - a.x, by - a.y) <= reach) { aim = { x: bx, y: by }; break; }
+    }
+    goTo(a, aim.x, aim.y, a.maxSpd, false);
     return;
   }
   if (a.side === 'O') {
@@ -725,7 +835,10 @@ export function think(sim, a) {
   a.want = null; a.faceTo = null; a.spdMul = 1;
   if (a.down) return;
   if (a.special) return a.special(sim, a);
-  if (sim.kind === 'kneel') { goTo(a, a.x, a.y, 1); return; }
+  if (sim.kind === 'kneel') {
+    if (sim.cfg.intSafety && a.side === 'D' && sim.qb()) return pursue(sim, a, sim.qb());
+    goTo(a, a.x, a.y, 1); return;
+  }
   const B = sim.ball;
   const c = sim.carrierAgent();
   if (c === a) {

@@ -130,6 +130,9 @@ export const ROUTES = {
   swing: { pts: [[-1, 4], [1, 12], [4, 30]], quick: true },
   angle: { pts: [[2, 4], [5, 1], [8, -12]] },
   bubble: { pts: [[-1.5, 3], [-0.8, 8], [2, 25]], quick: true },
+  // screens: sell pass pro / a stem, then settle behind the line for the throw
+  screen: { pts: [[-2.5, 4.5], [-2.2, 6.5]], sit: true, delay: 0.9, screen: true },
+  tunnel: { pts: [[-0.5, -1.5], [-1.5, -5.5]], sit: true, quick: true, screen: true },
 };
 
 // Default role for a label not referenced by a play.
@@ -155,6 +158,12 @@ export const PASS_PLAYS = [
     routes: { X: 'hitch', Z: 'hitch', H: 'hitch', A: 'hitch', Y: 'flat', F: 'check' }, prog: ['X', 'Z', 'H', 'A', 'Y', 'F'] },
   { id: 'bubble', name: 'Bubble Screen', forms: ['gun_doubles', 'gun_trips', 'gun_spread'], drop: 'quick', depth: 'short',
     routes: { H: 'bubble', A: 'bubble', X: 'stalk', Z: 'stalk', Y: 'block', F: 'block' }, prog: ['H', 'A'] },
+  { id: 'rb_screen', name: 'RB Screen', forms: ['gun_doubles', 'gun_trips', 'gun_spread', 'singleback', 'pistol'], drop: '5', depth: 'screen',
+    screen: { slot: 'F', throwT: 1.75, release: 0.95 },
+    routes: { F: 'screen', X: 'go', Z: 'go', H: 'go', A: 'go', Y: 'seam' }, prog: ['F'] },
+  { id: 'wr_tunnel', name: 'WR Tunnel Screen', forms: ['gun_doubles', 'gun_trips', 'gun_spread', 'singleback', 'pistol'], drop: 'quick', depth: 'screen',
+    screen: { slot: 'X', throwT: 0.75, release: 0.3 },
+    routes: { X: 'tunnel', H: 'stalk', Z: 'go', A: 'go', Y: 'block', F: 'block' }, prog: ['X'] },
   { id: 'mesh', name: 'Mesh', forms: ALLF, drop: '5', depth: 'medium',
     routes: { X: 'drag', Y: 'drag6', H: 'corner', A: 'corner', Z: 'dig', F: 'swing' }, prog: ['X', 'Y', 'H', 'A', 'Z', 'F'] },
   { id: 'smash', name: 'Smash', forms: QUICK, drop: '5', depth: 'medium',
@@ -194,6 +203,10 @@ export const RUN_PLAYS = [
   { id: 'toss', name: 'Toss', scheme: 'toss', aim: 8.5, forms: ['iform', 'singleback', 'ace_12', 'pistol'] },
   { id: 'draw', name: 'Draw', scheme: 'draw', aim: 0.8, forms: ['gun_doubles', 'gun_trips', 'gun_spread', 'pistol'] },
   { id: 'sneak', name: 'QB Sneak', scheme: 'sneak', aim: 0.4, forms: ['singleback', 'ace_12', 'iform', 'goal_line'] },
+  // option family: the QB reads one defender at the mesh
+  { id: 'zone_read', name: 'Zone Read', scheme: 'zone', aim: 2.0, option: 'read', forms: ['gun_doubles', 'gun_trips', 'gun_spread', 'pistol'] },
+  { id: 'rpo_slant', name: 'RPO Slant', scheme: 'zone', aim: 2.0, rpo: { slot: 'X', route: 'slant' }, forms: ['gun_doubles', 'gun_trips', 'gun_spread', 'pistol'] },
+  { id: 'rpo_bubble', name: 'RPO Bubble', scheme: 'zone', aim: 2.0, rpo: { slot: 'H', route: 'bubble' }, forms: ['gun_doubles', 'gun_trips', 'gun_spread'] },
 ];
 
 // ---------------- Defense ----------------

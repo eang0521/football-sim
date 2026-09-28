@@ -43,7 +43,8 @@ The site will be served at `https://<user>.github.io/<repo>/`. All paths are rel
 | Play art | Pre-snap routes, run aiming point, zone landmarks, man matchups, blitzers |
 | Names | Floating jersey numbers and names |
 | Auto-advance | Off = pause after every play |
-| **Teams** | Edit teams, colors, coach tendencies, and every player's ratings (saved in your browser) |
+| **Teams** | Edit teams, colors, coach tendencies, and every player's ratings and traits (saved in your browser) |
+| **Season** | Start a season, then watch or simulate each week's games; view standings, leaders, injuries and history |
 
 ## How it works
 
@@ -60,6 +61,8 @@ js/
     special.js       kickoffs (2024+ dynamic format), punts, field goals, PATs
     penalties.js     foul definitions, pre-snap rolls, enforcement and accept/decline logic
     stats.js         box-score accumulation
+    weather.js       game-day conditions and their effects
+  season/            season mode: schedule, standings, playoffs, leaders, development
   render/            Three.js stadium, field texture, player rigs, cameras
   ui/                scorebug, play-by-play, box score, team editor
   data/              fictional league generation and localStorage persistence
@@ -87,7 +90,11 @@ tools/               Node harnesses for tuning realism
 
   Enforcement follows NFL rules: previous spot or spot of the foul, half the distance to the goal, automatic first downs, offsetting fouls, and dead-ball personal fouls tacked on after the play. The non-offending team accepts or declines using an expected-points comparison. A yellow flag lands on the turf where the foul happened.
 - **Injuries.** Hard hits (tackles, sacks, pancakes, late hits) can injure players. Severity ranges from missing a few snaps, to questionable, to out for the game; concussions are always out. Injured players stay down, the depth chart sends in the backup, and returning players are announced. Injuries appear in the play-by-play and the box score.
-- **Game management.** Clock rules include runoff by tempo and out of bounds late in halves, the two-minute warning, timeouts, hurry-up, and kneel-downs. Also modeled: 4th-down and field goal decisions from kicker range and coach aggression, a 2-point chart, and the 2025 overtime rules.
+- **Playbook depth.** RB and WR screens (linemen sell pass protection, then release), pre-snap motion (a man defender trails the motion man, which tells the QB man vs. zone), zone read and RPOs (the QB reads a key defender at the mesh), audibles when the box outnumbers the blockers, hot routes against 6+ rushers, and disguised coverages and simulated pressure that muddy the QB's pre-snap read.
+- **Players.** Fatigue drains with effort and recovers on the sideline, so linemen, backs and defensive backs rotate. Traits change behavior, not just ratings: Scrambler, Gunslinger, Game Manager, Possession Receiver, Ball Hawk, Workhorse and more, all editable in the team editor. Team momentum swings on big plays and turnovers, and late in close games clutch players rise while shaky ones tighten up.
+- **Game day.** Weather (rain, snow, wind, cold) affects catching, ball security, throwing, footing and kicking, and is rendered in the stadium. Coaches learn in-game what's working and make halftime adjustments; defenses adapt to an offense's tendencies. Officials sometimes miss close calls (sideline catches, spots, goal-line plunges, fumbles), leading to booth reviews and coach's challenges. Special-teams situations include onside kicks, squib kicks, and fake punts and field goals.
+- **Season mode.** An 8-team, 14-week season with standings, tiebreakers and a 4-team playoff. You can watch or simulate any game. Injuries carry over week to week, players develop in the offseason, and the league tracks season and career leaders and a champions history.
+- **Game management.** Clock rules include runoff by tempo and out of bounds late in halves, the two-minute warning, timeouts, hurry-up, spiking the ball, the 10-second runoff, victory formation, intentional safeties, and kneel-downs. Also modeled: 4th-down and field goal decisions from kicker range and coach aggression, a 2-point chart, and the 2025 overtime rules.
 
 ### Realism checks
 
@@ -98,6 +105,11 @@ tools/               Node harnesses for tuning realism
 - `tools/rushdiag.mjs`: pressure and sack timing when the QB never throws
 - `tools/openfield.mjs depth lateral`: one-on-one open-field tackling
 - `tools/trace.mjs <play> <coverage> <seed> [-a]`: a single play, including an ASCII field view
+- `tools/stdiag.mjs`: onside, squib and fake success rates
+- `tools/eventcount.mjs N`: how often reviews, spikes, onside kicks, fakes and audibles happen
+- `tools/weatherdiag.mjs`: scoring and turnovers by weather type
+- `tools/snapdiag.mjs`: snap shares by depth-chart slot (rotation check)
+- `tools/seasondiag.mjs`: simulates a full season
 
 ## Customizing
 
