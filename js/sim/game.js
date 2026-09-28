@@ -6,6 +6,7 @@ import { callOffense, callDefense } from './playcaller.js';
 import { fgProbability } from './special.js';
 import { Stats } from './stats.js';
 import { depthChart } from '../data/teamgen.js';
+import { FOULS, rollPreSnap, enforce, stateValue, describeFoul } from './penalties.js';
 import { FIELD_W, MID_Y, HASH_L, HASH_R, QUARTER_LEN, OT_LEN } from './constants.js';
 
 const other = (k) => (k === 'home' ? 'away' : 'home');
@@ -30,6 +31,8 @@ export class Game {
       openingReceiver: receiver, warned: false, final: false, ot: null,
     };
     this.lastAbs = null;
+    this.injuries = new Map(); // pid -> { team, p, part, status, returnAt, returned }
+    this.snapCount = 0;
     this.addLog('info', `${this.teams[receiver].name} win the toss and will receive.`);
   }
 
@@ -118,6 +121,18 @@ export class Game {
       }
     }
     meta.dir = this.dirOf(meta.off);
+    // injured players sit; players whose injury window has passed return
+    cfg.unavailable = new Set();
+    for (const [pid, inj] of this.injuries) {
+      if (inj.returnAt > this.snapCount) cfg.unavailable.add(pid);
+      else if (!inj.returned) {
+        inj.returned = true;
+        this.addLog('injury', `${this.teams[inj.team].abbr} #${inj.p.num} ${inj.p.first[0]}.${inj.p.last} (${inj.part}) returns to the game.`);
+      }
+    }
+    if (cfg.kind === 'scrimmage' && meta.type === 'scrimmage') {
+      cfg.preSnap = rollPreSnap(rng, cfg.offTeam, cfg.defTeam, meta.off === 'away', cfg.ctx);
+    }
     meta.pre = { down: s.down, toGo: s.toGo, ballOn: s.ballOn, clock: s.clock, quarter: s.quarter, dstr: this.downStr(), fpos: this.fieldPos(s.poss, s.ballOn) };
     cfg.rng = rng;
     cfg.skipLineup = !!opts.skipLineup;
@@ -255,7 +270,10 @@ export class Game {
     for (const a of sim.agents) this.lastAbs.set(a.id, this.toAbs(a.x, a.y, meta.dir));
 
     const isConv = meta.type === 'conversion';
-    if (!isConv) this.stats.apply(res.events);
+    this.snapCount++;
+    const injuryLogs = this.processInjuries(sim);
+    const pen = isConv ? { mode: 'none' } : this.resolveFouls(sim);
+    if (!isConv && pen.mode !== 'nullify') this.stats.apply(res.events);
     let elapsed = res.elapsed;
     if (meta.type === 'kickoff' && res.touchback) elapsed = 0;
     if (meta.type === 'xp' || isConv) elapsed = 0;
@@ -267,6 +285,15 @@ export class Game {
       ? `${meta.pre.dstr} at ${meta.pre.fpos}` : meta.type === 'kickoff' ? 'Kickoff' : meta.type === 'xp' ? 'PAT' : '2-PT';
     let text = res.desc;
     let changed = false, scored = false;
+    if (pen.mode === 'nullify') {
+      s.ballOn = pen.state.ballOn; s.down = pen.state.down; s.toGo = pen.state.toGo; s.phase = 'scrimmage';
+      if (pen.state.firstDown) T[off].firstDowns++;
+      this.addLog('penalty', pen.text, { prefix, off, label: meta.label });
+      for (const l of injuryLogs) this.addLog('injury', l);
+      if (this.drive) this.drive.plays++;
+      return { text: pen.text, prefix };
+    }
+    if (pen.suffix) text += ' ' + pen.suffix;
     const newY = clamp(res.possession === 'O' ? sim.ball.y : FIELD_W - sim.ball.y, HASH_R, HASH_L);
 
     if (this.drive && meta.type !== 'xp' && !isConv && meta.type !== 'kickoff') this.drive.plays++;
@@ -316,7 +343,8 @@ export class Game {
         const T0 = T[off];
         if (meta.type === 'scrimmage' || meta.type === 'kneel') {
           T0.plays++;
-          const gain = res.td === 'O' ? Math.round(100 - s.ballOn) : res.possession === 'O' ? Math.round(res.spotX - s.ballOn) : 0;
+          const intercepted = res.events.some((e) => e.type === 'pass' && e.int);
+          const gain = res.td === 'O' ? Math.round(100 - s.ballOn) : res.td === 'D' || intercepted ? 0 : Math.round(res.spotX - s.ballOn);
           if (res.kind === 'pass') { T0.passAtt++; if (res.events.some((e) => e.type === 'pass' && e.cmp)) { T0.passCmp++; T0.passYds += gain; T0.totalYds += gain; } }
           else if (res.kind === 'sack') { T0.sacks++; T0.sackYds += -gain; T0.totalYds += gain; }
           else { T0.rushAtt++; T0.rushYds += gain; T0.totalYds += gain; }
@@ -378,13 +406,22 @@ export class Game {
       }
     }
 
-    this.addLog(scored ? 'score' : res.turnover ? 'turnover' : 'play', text, { prefix, off, label: meta.label });
+    if (pen.post && !scored && !changed && s.phase === 'scrimmage' && s.poss === off) {
+      const f = pen.post;
+      const y = Math.min(15, (100 - s.ballOn) / 2);
+      s.ballOn += y; s.down = 1; s.toGo = Math.min(10, 100 - s.ballOn);
+      this.countPenalty(def, y);
+      text += ` PENALTY: ${describeFoul(f, this.teams[def])}, ${Math.round(y)} yard${Math.round(y) === 1 ? '' : 's'}${y < 15 ? ' (half the distance)' : ''}, automatic first down.`;
+    } else if (pen.post) text += ` (${FOULS[pen.post.type].name} on ${this.teams[def].abbr} enforced on the kickoff.)`;
+    this.addLog(scored ? 'score' : res.turnover ? 'turnover' : pen.flag ? 'penalty' : 'play', text, { prefix, off, label: meta.label });
+    for (const l of injuryLogs) this.addLog('injury', l);
 
     // ----- clock management between plays -----
     const q = s.quarter;
     if ((q === 2 || q === 4) && !s.warned && clockBefore > 120 && s.clock <= 120 && s.clock > 0) {
       s.warned = true; this.addLog('info', 'Two-minute warning.');
-    } else if (s.phase === 'scrimmage' && !res.clockStops && !changed && !scored && meta.type !== 'kickoff' && s.clock > 0) {
+    } else if (s.phase === 'scrimmage' && !res.clockStops && !changed && !scored && meta.type !== 'kickoff' && s.clock > 0
+      && !pen.flag && !injuryLogs.length) {
       const oobStops = res.oob && ((q === 2 && s.clock <= 120) || (q >= 4 && s.clock <= 300));
       if (!oobStops) this.runoff(res);
     }
@@ -395,6 +432,105 @@ export class Game {
       this.finish();
     }
     return { text, prefix };
+  }
+
+  countPenalty(key, yds) {
+    const T = this.stats.team[key];
+    T.penalties++; T.penYds += Math.round(Math.abs(yds));
+  }
+
+  // Where the offense would stand if the play result stands (for accept/decline decisions).
+  outcomeState(res, pre) {
+    if (res.td) return { td: res.td };
+    if (res.safety) return { safety: true };
+    if (res.possession === 'D') return { turnover: true, ballOn: clamp(res.spotX, 1, 99) };
+    const nb = clamp(res.spotX, 0.5, 99.5);
+    if (nb >= pre.ballOn + pre.toGo) return { ballOn: nb, down: 1, toGo: Math.min(10, 100 - nb) };
+    return { ballOn: nb, down: pre.down + 1, toGo: pre.ballOn + pre.toGo - nb };
+  }
+
+  // Decide and enforce flags. Returns { mode: 'none'|'nullify'|'declined'|'kick', text, state, suffix, post, flag }.
+  resolveFouls(sim) {
+    const res = sim.result, meta = sim.meta, pre = meta.pre;
+    const fouls = sim.fouls || [];
+    if (!fouls.length) return { mode: 'none' };
+    const off = meta.off, def = other(off);
+    const teamOf = (side) => (side === 'O' ? off : def);
+    const yardsWord = (y) => { const n = Math.round(Math.abs(y)); return `${n} yard${n === 1 ? '' : 's'}`; };
+
+    // Kick returns: holding / illegal block by the return team, enforced from the spot of the foul.
+    if (meta.type === 'kickoff' || meta.type === 'punt') {
+      const f = fouls.find((x) => x.side === 'R');
+      const returned = res.outcome === 'tackle' || res.outcome === 'oob' || res.outcome === 'td';
+      if (!f || res.possession !== 'D' || res.touchback || !returned) return { mode: 'none' };
+      const R = res.td === 'D' ? 100 : 100 - res.spotX;
+      const F = clamp(100 - f.x, 1, 99);
+      const y = Math.min(10, F / 2);
+      const newR = F - y;
+      if (newR >= R) return { mode: 'none', suffix: `(${FOULS[f.type].name} on ${this.teams[def].abbr} declined.)`, flag: true };
+      res.spotX = 100 - newR;
+      const wasTD = !!res.td;
+      res.td = null;
+      this.countPenalty(def, R - newR);
+      return { mode: 'kick', flag: true, suffix: `${wasTD ? 'TOUCHDOWN NULLIFIED. ' : ''}PENALTY: ${describeFoul(f, this.teams[def])}, ${yardsWord(y)} from the spot of the foul.` };
+    }
+    if (meta.type !== 'scrimmage') return { mode: 'none' };
+
+    const live = fouls.filter((f) => !f.post);
+    const postF = fouls.find((f) => f.post && f.side === 'D' && res.possession === 'O');
+    if (res.outcome === 'presnap') {
+      const f = live[0];
+      const st = enforce(f, pre);
+      this.countPenalty(teamOf(f.side), st.moved);
+      const dn = st.firstDown ? 'First down' : `Replay ${['', '1st', '2nd', '3rd', '4th'][st.down]} down`;
+      return { mode: 'nullify', state: st, flag: true,
+        text: `PENALTY: ${describeFoul(f, this.teams[teamOf(f.side)])}, ${yardsWord(st.moved)}${st.halfDist ? ' (half the distance)' : ''}. ${dn}.` };
+    }
+    const offF = live.filter((f) => f.side === 'O'), defF = live.filter((f) => f.side === 'D');
+    if (offF.length && defF.length) {
+      return { mode: 'nullify', state: { ...pre }, flag: true,
+        text: `${res.desc} Offsetting penalties (${describeFoul(offF[0], this.teams[off])}; ${describeFoul(defF[0], this.teams[def])}). Replay the down.` };
+    }
+    const playSt = this.outcomeState(res, pre);
+    const worst = (arr) => arr.slice().sort((a, b) => (FOULS[b.type].yds ?? 20) - (FOULS[a.type].yds ?? 20))[0];
+    if (offF.length) {
+      const f = worst(offF);
+      const penSt = enforce(f, pre);
+      const accept = stateValue(penSt) < stateValue(playSt); // defense picks what hurts the offense most
+      if (!accept) return { mode: 'declined', flag: true, post: postF, suffix: `(${FOULS[f.type].name} on ${this.teams[off].abbr} declined.)` };
+      this.countPenalty(off, penSt.moved);
+      return { mode: 'nullify', state: penSt, flag: true,
+        text: `${res.td === 'O' ? 'TOUCHDOWN NULLIFIED. ' : ''}${res.desc} PENALTY: ${describeFoul(f, this.teams[off])}, ${yardsWord(penSt.moved)}. No play.` };
+    }
+    if (defF.length) {
+      const f = worst(defF);
+      const penSt = enforce(f, pre, f.x);
+      const accept = !playSt.td && stateValue(penSt) > stateValue(playSt); // offense picks the better outcome
+      if (!accept) return { mode: 'declined', flag: true, post: postF, suffix: `(${FOULS[f.type].name} on ${this.teams[def].abbr} declined.)` };
+      this.countPenalty(def, penSt.moved);
+      return { mode: 'nullify', state: penSt, flag: true,
+        text: `${res.desc} PENALTY: ${describeFoul(f, this.teams[def])}, ${yardsWord(penSt.moved)}${penSt.firstDown ? ', automatic first down' : ''}.` };
+    }
+    return { mode: 'declined', flag: true, post: postF };
+  }
+
+  processInjuries(sim) {
+    const logs = [];
+    const rng = this.rng;
+    for (const inj of sim.injuries || []) {
+      const team = inj.side === 'O' ? sim.meta.off : sim.meta.def;
+      if (this.injuries.has(inj.p.id)) continue;
+      const W = { ankle: 20, knee: 14, hamstring: 14, shoulder: 12, concussion: 9, hand: 8, ribs: 8, groin: 7 };
+      const part = rng.weighted(Object.keys(W), (x) => W[x]);
+      const r = rng.next();
+      let status, returnAt;
+      if (part === 'concussion' || r > 0.72) { status = 'out for the game'; returnAt = Infinity; }
+      else if (r > 0.45) { status = 'questionable to return'; returnAt = this.snapCount + rng.int(18, 45); }
+      else { status = 'shaken up, will miss a few plays'; returnAt = this.snapCount + rng.int(3, 10); }
+      this.injuries.set(inj.p.id, { team, p: inj.p, part, status, returnAt, returned: returnAt === Infinity, q: this.s.quarter });
+      logs.push(`INJURY: ${this.teams[team].abbr} #${inj.p.num} ${inj.p.first[0]}.${inj.p.last} (${inj.p.pos}), ${part}. ${status[0].toUpperCase() + status.slice(1)}.`);
+    }
+    return logs;
   }
 
   runoff(res) {

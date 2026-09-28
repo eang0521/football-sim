@@ -27,7 +27,7 @@ function takeMany(pk, list) { return list.map((pos) => pk.take(pos)); }
 // ---------------- Kickoff ----------------
 function setupKickoff(sim, cfg) {
   const { offTeam: kt, defTeam: rt, los } = cfg;
-  const kp = new Picker(kt), rp = new Picker(rt);
+  const kp = new Picker(kt, cfg.unavailable), rp = new Picker(rt, cfg.unavailable);
   // Skip the top starters where sensible: take depth players for coverage
   const K = kp.take('K');
   kp.used.add(kp.d.QB[0]?.id);
@@ -40,7 +40,7 @@ function setupKickoff(sim, cfg) {
   cov.forEach((p, i) => { const a = makeAgent(p, 'O', 'COV' + i, los + 25, ys[i]); a.special = coverage; a.d.laneY = ys[i]; off.push(a); });
   // Return team
   const d = rp.d;
-  const ret1 = [...d.RB, ...d.WR, ...d.CB].sort((a, b) => (b.ratings.spd + b.ratings.btk) - (a.ratings.spd + a.ratings.btk))[0];
+  const ret1 = [...d.RB, ...d.WR, ...d.CB].filter((p) => !rp.used.has(p.id)).sort((a, b) => (b.ratings.spd + b.ratings.btk) - (a.ratings.spd + a.ratings.btk))[0];
   rp.used.add(ret1.id);
   const ret2 = rp.take('RB');
   const blk = takeMany(rp, ['LB', 'LB', 'TE', 'FB', 'LB', 'S', 'TE', 'DE', 'S']);
@@ -250,7 +250,7 @@ function finishTackle(sim, res, st) {
 // ---------------- Punt ----------------
 function setupPunt(sim, cfg) {
   const { offTeam: kt, defTeam: rt, los, ballY } = cfg;
-  const kp = new Picker(kt), rp = new Picker(rt);
+  const kp = new Picker(kt, cfg.unavailable), rp = new Picker(rt, cfg.unavailable);
   const P = kp.take('P');
   const line = takeMany(kp, ['OL', 'OL', 'OL', 'OL', 'OL']);
   const wings = takeMany(kp, ['TE', 'TE']);
@@ -268,7 +268,7 @@ function setupPunt(sim, cfg) {
   const pA = makeAgent(P, 'O', 'P', los - 14, ballY); pA.special = punter; off.push(pA);
   // return team
   const d = rp.d;
-  const ret1 = [...d.WR, ...d.CB, ...d.RB].sort((a, b) => (b.ratings.spd + b.ratings.btk + b.ratings.cth) - (a.ratings.spd + a.ratings.btk + a.ratings.cth))[0];
+  const ret1 = [...d.WR, ...d.CB, ...d.RB].filter((p) => !rp.used.has(p.id)).sort((a, b) => (b.ratings.spd + b.ratings.btk + b.ratings.cth) - (a.ratings.spd + a.ratings.btk + a.ratings.cth))[0];
   rp.used.add(ret1.id);
   const rush = takeMany(rp, ['DE', 'DT', 'LB', 'LB', 'DE', 'LB']);
   const jam = takeMany(rp, ['CB', 'CB']);
@@ -443,7 +443,7 @@ function yardLine(ballOn) {
 // ---------------- Field goal / PAT ----------------
 function setupFG(sim, cfg) {
   const { offTeam: kt, defTeam: rt, los, ballY } = cfg;
-  const kp = new Picker(kt), rp = new Picker(rt);
+  const kp = new Picker(kt, cfg.unavailable), rp = new Picker(rt, cfg.unavailable);
   const K = kp.take('K');
   const H = kp.take('P');
   const line = takeMany(kp, ['OL', 'OL', 'OL', 'OL', 'OL', 'TE', 'TE', 'TE', 'OL']);

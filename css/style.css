@@ -187,3 +187,10 @@ table.stats th:first-child, table.stats td:first-child { text-align: left; }
 .ed-roster input[type=number] { width: 46px; -moz-appearance: textfield; }
 .ed-roster input[type=number]::-webkit-outer-spin-button, .ed-roster input[type=number]::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 .modal-card { overflow-x: hidden; }
+/* penalties & injuries */
+.pbp-item.penalty { background: rgba(255, 214, 0, .08); border-left-color: #ffd600; }
+.pbp-item.injury { color: #ffb3b3; font-size: 12px; border-left-color: #ff7a7a; background: rgba(255, 122, 122, .06); }
+#banner.flag { border-color: #ffd600; }
+#banner .flagtag { display: inline-block; background: #ffd600; color: #151515; font: 800 12px var(--cond); letter-spacing: .06em; padding: 1px 6px; border-radius: 3px; margin-right: 8px; vertical-align: 2px; }
+.injlist { font-size: 12.5px; line-height: 1.6; }
+.injlist .out { color: var(--bad); }

@@ -58,6 +58,7 @@ js/
     ai.js            per-player decision making (QB, receivers, blockers, runner, rush, coverage, pursuit)
     playsim.js       60 Hz physics: steering, blocking engagement, ball flight, catches, tackles, fumbles
     special.js       kickoffs (2024+ dynamic format), punts, field goals, PATs
+    penalties.js     foul definitions, pre-snap rolls, enforcement and accept/decline logic
     stats.js         box-score accumulation
   render/            Three.js stadium, field texture, player rigs, cameras
   ui/                scorebug, play-by-play, box score, team editor
@@ -76,11 +77,21 @@ tools/               Node harnesses for tuning realism
   - *Zone:* drops to landmarks (flats, hooks, curl-flat, thirds, halves, quarters) and matches threats. Deep defenders turn and run on vertical routes. Everyone reacts to the QB's eyes and breaks on the throw.
 - **Runner vision.** The runner evaluates headings by how far he can get before a defender could intercept, with reaction time based on awareness. Jukes, broken tackles, and cutbacks emerge from this.
 - **Tackling.** Pursuit uses analytic intercept angles with outside contain. Arm tackles at the edge of reach, gang tackles, momentum, diving tackles, forward progress, and fumbles are all modeled.
+- **Penalties.** Flags come out of what happens on the field, not a dice roll after the play:
+  - *Holding:* a beaten blocker grabs instead of letting the rusher shed.
+  - *Pass interference and defensive holding:* contact on contested balls and while routes develop.
+  - *Roughing the passer:* late hits on the QB.
+  - *Face masks and unnecessary roughness:* on tackles.
+  - *Return fouls:* holding and blocks in the back on kick returns.
+  - *Pre-snap fouls:* false start, offside, neutral zone, and delay of game. Rates scale with unit awareness and road-crowd noise.
+
+  Enforcement follows NFL rules: previous spot or spot of the foul, half the distance to the goal, automatic first downs, offsetting fouls, and dead-ball personal fouls tacked on after the play. The non-offending team accepts or declines using an expected-points comparison. A yellow flag lands on the turf where the foul happened.
+- **Injuries.** Hard hits (tackles, sacks, pancakes, late hits) can injure players. Severity ranges from missing a few snaps, to questionable, to out for the game; concussions are always out. Injured players stay down, the depth chart sends in the backup, and returning players are announced. Injuries appear in the play-by-play and the box score.
 - **Game management.** Clock rules include runoff by tempo and out of bounds late in halves, the two-minute warning, timeouts, hurry-up, and kneel-downs. Also modeled: 4th-down and field goal decisions from kicker range and coach aggression, a 2-point chart, and the 2025 overtime rules.
 
 ### Realism checks
 
-`node tools/headless.mjs 24` simulates 24 full games and prints league averages next to NFL norms. At the time of writing it produces about 25 points, 63 plays, 7.5 yards per attempt, and a 58–64% completion rate per team-game, with realistic punt, turnover, and field goal rates. Sacks (about 1 per game vs. the NFL's 2.3) and third-down conversion (about 32–38% vs. 39%) still run a little low. Other harnesses:
+`node tools/headless.mjs 24` simulates 24 full games and prints league averages next to NFL norms. At the time of writing it produces about 25 points, 63 plays, 7.5 yards per attempt, and a 58–64% completion rate per team-game, with realistic punt, turnover, and field goal rates, about 4–5 accepted penalties per team, and 1–1.5 in-game injuries per team. Sacks (about 1 per game vs. the NFL's 2.3) and third-down conversion (about 32–38% vs. 39%) still run a little low. Other harnesses:
 
 - `tools/playstats.mjs [run|pass] N`: outcome distributions per play and coverage
 - `tools/passdiag.mjs N`: throw timing, air yards vs YAC, completion by depth
@@ -92,4 +103,4 @@ tools/               Node harnesses for tuning realism
 
 - **Teams and players:** use the in-app editor, or export, edit, and import the league as JSON.
 - **Playbook:** add formations, routes (waypoints relative to alignment), and concepts in `js/sim/playbook.js`. The play-caller picks them up automatically.
-- **Tuning knobs:** tackle probability and reach (`checkTackles` in `playsim.js`), block shed rates (`engagements`), QB read thresholds (`qbPass` in `ai.js`), and man-coverage lag (`manThink`).
+- **Tuning knobs:** tackle probability and reach (`checkTackles` in `playsim.js`), block shed rates (`engagements`), QB read thresholds (`qbPass` in `ai.js`), and man-coverage lag (`manThink`). Penalty rates are set where each flag is thrown (`foul(...)` calls in `playsim.js`, plus `rollPreSnap` in `penalties.js`). Injury rates are the `maybeInjure(...)` calls in `playsim.js`.

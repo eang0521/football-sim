@@ -11,7 +11,7 @@ const blank = () => ({
 });
 const teamBlank = () => ({
   firstDowns: 0, plays: 0, totalYds: 0, passYds: 0, rushYds: 0, rushAtt: 0, passAtt: 0, passCmp: 0,
-  thirdAtt: 0, thirdConv: 0, fourthAtt: 0, fourthConv: 0, turnovers: 0, sacks: 0, sackYds: 0, top: 0, penalties: 0,
+  thirdAtt: 0, thirdConv: 0, fourthAtt: 0, fourthConv: 0, turnovers: 0, sacks: 0, sackYds: 0, top: 0, penalties: 0, penYds: 0,
   redZoneAtt: 0, redZoneTD: 0,
 });
 

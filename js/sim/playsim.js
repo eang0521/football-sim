@@ -6,6 +6,7 @@ import { think, attackDir } from './ai.js';
 import { setupSpecial, rollUpdate } from './special.js';
 
 const HIST_LEN = 45;
+const POST_FOULS = new Set(['roughing_passer', 'face_mask', 'unnecessary_roughness']);
 export const shortName = (p) => (p ? `${p.first[0]}.${p.last}` : '?');
 
 export class PlaySim {
@@ -30,6 +31,8 @@ export class PlaySim {
     this.isRun = false;
     this.pass = null;
     this.run = null;
+    this.fouls = [];
+    this.injuries = [];
     if (this.kind === 'scrimmage' || this.kind === 'kneel') setupScrimmage(this, cfg);
     else setupSpecial(this, cfg);
     this.agents = [...this.off, ...this.def];
@@ -78,6 +81,25 @@ export class PlaySim {
     this.startRun(rb, { hole: { x: this.los + 1.5, y: this.run.holeY } });
     rb.anim = 'carry';
   }
+  // Record a penalty flag against an agent. Kicks (FG/PAT) and kneels are exempt.
+  foul(type, a, x, y) {
+    if (this.kind === 'fg' || this.kind === 'xp' || this.kind === 'kneel') return;
+    if (this.fouls.some((f) => f.type === type && f.a === a)) return;
+    const side = this.kind === 'scrimmage' ? a.side : a.side === 'D' ? 'R' : 'K';
+    if (side === 'K') return; // kicking-team fouls not modeled
+    this.fouls.push({ type, side, a, p: a.p, x: x ?? a.x, y: y ?? a.y, t: this.t, post: POST_FOULS.has(type) });
+    this.note('flag', a);
+  }
+
+  // Possible injury on a hit. base = probability scale for this collision.
+  maybeInjure(a, base) {
+    if (a.injured || this.kind === 'kneel' || !this.rng.chance(base)) return;
+    a.injured = true;
+    a.down = true; a.downT = 0; a.anim = 'down';
+    this.injuries.push({ a, p: a.p, side: a.side });
+    this.note('injury', a);
+  }
+
   release(a) {
     const d = a.engaged;
     if (!d) return;
@@ -112,7 +134,7 @@ export class PlaySim {
     B.onGround = false;
     if (!ev.pitch && !ev.snap) {
       this.st.passer = qb; this.st.target = target; this.st.thrown = true; this.st.away = !!ev.away;
-      this.st.airYds = c.x - this.los; this.st.throwMargin = ev.score;
+      this.st.airYds = c.x - this.los; this.st.throwT = this.t;
       this.note('throw', qb, target);
     }
   }
@@ -133,6 +155,7 @@ export class PlaySim {
     this.phase = 'live';
     this.t = 0;
     for (const a of this.agents) { a.anim = 'run'; a.hist = []; }
+    if (this.cfg.preSnap) return this.preSnapFoul(this.cfg.preSnap);
     if (this.onSnap) return this.onSnap();
     const qb = this.qb();
     if (this.kind === 'kneel') {
@@ -161,6 +184,16 @@ export class PlaySim {
     } else {
       this.ball.state = 'held'; this.ball.holder = qb;
     }
+  }
+
+  preSnapFoul(type) {
+    const pool = type === 'false_start' ? this.off.filter((a) => a.fpos === 'OL' || a.fpos === 'TE')
+      : type === 'delay_of_game' ? [this.qb()]
+        : this.def.filter((a) => a.fpos === 'DE' || a.fpos === 'DT' || a.fpos === 'LB');
+    const a = this.rng.pick(pool.length ? pool : this.off);
+    if (type !== 'delay_of_game') { a.vx = attackDir(a) * 3.5; a.anim = 'run'; }
+    this.foul(type, a);
+    this.whistle('presnap', this.los);
   }
 
   whistle(outcome, spotX) {
@@ -217,6 +250,7 @@ export class PlaySim {
     this.checkTackles();
     if (this.phase !== 'live') return;
     this.checkBounds();
+    if (this.kind === 'scrimmage') this.checkLiveFouls();
     for (const a of this.agents) {
       a.hist.push({ x: a.x, y: a.y, vx: a.vx, vy: a.vy });
       if (a.hist.length > HIST_LEN) a.hist.shift();
@@ -267,6 +301,38 @@ export class PlaySim {
     B.x = h.x + Math.cos(h.face) * 0.25; B.y = h.y + Math.sin(h.face) * 0.25;
     B.z = h.down ? 0.3 : 1.05;
     B.vx = h.vx; B.vy = h.vy; B.vz = 0;
+  }
+
+  checkLiveFouls() {
+    // Defensive holding / illegal contact while routes develop
+    if (!this.isRun && !this.runner && !this.st.thrown && this.t > 1.1 && !this.st.holdChecked) {
+      this.st.holdChecked = true;
+      for (const r of this.off) {
+        if (r.role !== 'route') continue;
+        const d = this.def.find((o) => !o.down && Math.hypot(o.x - r.x, o.y - r.y) < 1.3);
+        if (d && this.rng.chance(0.028 * (1.5 - Math.max(d.r.mcv, d.r.zcv) / 100) / 0.6)) {
+          this.foul(r.x - this.los > 5 && this.rng.chance(0.4) ? 'illegal_contact' : 'def_holding', d);
+        }
+      }
+    }
+    // Roughing the passer: a hit shortly after the release
+    const B = this.ball;
+    if (this.st.thrown && !this.st.away && this.st.throwT != null) {
+      const dtT = this.t - this.st.throwT;
+      if (dtT > 0.12 && dtT < 0.6) {
+        const qb = this.st.passer;
+        for (const o of this.def) {
+          if (o.down || o.blockers.length || o.d.hitQB) continue;
+          if (Math.hypot(o.x - qb.x, o.y - qb.y) < 1.0) {
+            o.d.hitQB = true;
+            if (!qb.down) { qb.down = true; qb.downT = 1.2; qb.anim = 'down'; }
+            this.maybeInjure(qb, 0.012);
+            const late = dtT > 0.35 ? 1.8 : 1;
+            if (Math.hypot(o.vx, o.vy) > 4 && this.rng.chance(0.011 * late)) this.foul('roughing_passer', o);
+          }
+        }
+      }
+    }
   }
 
   // ---------- blocking ----------
@@ -349,6 +415,13 @@ export class PlaySim {
       if (c && c !== this.qb() && Math.hypot(c.x - t.x, c.y - t.y) < 1.8) lam *= 1.8;
       if (t.blockers.some((b) => b.d.escort)) lam *= 2.5;
       if (this.rng.next() < lam * dt) {
+        // a beaten blocker sometimes grabs instead of letting go: holding
+        const hb = t.blockers[0];
+        const holdSide = this.kind === 'scrimmage' ? hb.side === 'O' : hb.side === 'D';
+        if (holdSide && this.rng.chance((passMode ? 0.015 : 0.011) * (1.45 - hb.r.awr / 100) * (this.kind === 'scrimmage' ? 1 : 8))) {
+          this.foul(this.kind === 'scrimmage' ? 'off_holding' : (this.rng.chance(0.4) ? 'ret_block_back' : 'ret_holding'), hb);
+          continue; // the hold keeps the defender engaged
+        }
         for (const b of t.blockers) { b.engaged = null; b.noBlock[t.uid] = this.t + 0.9; b.anim = 'run'; }
         t.blockers = [];
         if (passMode) this.note('shed', null, t);
@@ -362,6 +435,7 @@ export class PlaySim {
         t.down = true; t.downT = 1.3; t.anim = 'down';
         for (const b of t.blockers) { b.engaged = null; b.noBlock[t.uid] = this.t + 1.5; }
         t.blockers = [];
+        this.maybeInjure(t, 0.006);
         this.note('pancake', null, t);
       }
     }
@@ -491,7 +565,10 @@ export class PlaySim {
       const depthK = airY < 10 ? 0.6 : airY < 20 ? 0.85 : 1.1;
       const pPlay = (0.12 + skill * 0.45) * (1 - (n.d / R) ** 2) * tracking * depthK;
       if (rng.chance(pPlay)) {
-        if (rng.chance(0.04 + d.r.cth / 100 * 0.07) && inBounds) return this.interception(d);
+        // contact at the catch point: pass interference (worse if not looking back for the ball)
+        if (airY > 4 && n.d < 1.2 && rng.chance((tracking < 1 ? 0.45 : 0.2) * (airY > 18 ? 1.5 : 1))) {
+          this.foul('dpi', d, B.x, B.y);
+        } else if (rng.chance(0.04 + d.r.cth / 100 * 0.07) && inBounds) return this.interception(d);
         this.st.pbu = d;
         this.whistle('incomplete', this.los);
         B.vz = 2; B.vy += rng.normal(0, 3);
@@ -505,6 +582,8 @@ export class PlaySim {
     if (dBall > 0.85) pCatch *= 1 - (dBall - 0.85) * 0.9; // diving / stretching catch
     if (r !== this.st.target) pCatch *= 0.85;
     if (!inBounds || r.y < 0.1 || r.y > FIELD_W - 0.1) { this.st.oobCatch = true; this.whistle('incomplete', this.los); return; }
+    if (crowd && (this.st.airYds ?? 0) > 4 && rng.chance(0.05)) this.foul('opi', r);
+    else if (crowd && (this.st.airYds ?? 0) > 4 && rng.chance(0.08)) this.foul('dpi', defNear[0].a, B.x, B.y);
     if (rng.chance(pCatch)) {
       B.state = 'held'; B.holder = r; B.pass = null; B.vz = 0;
       this.st.catcher = r; this.st.catchX = r.x; this.st.catchT = this.t;
@@ -611,6 +690,13 @@ export class PlaySim {
     o.anim = 'tackle';
     if (this.rng.chance(0.3)) { o.down = true; o.downT = 1.4; }
     this.st.tacklers = [o];
+    // injuries on the hit (harder hits, more risk)
+    const force = Math.min(2, (cSpd + Math.hypot(o.vx, o.vy)) / 9);
+    const pocketQB0 = c.role === 'qb' && !c.d.runner;
+    this.maybeInjure(c, 0.0085 * force * (pocketQB0 ? 1.4 : 1) * (helpers ? 1.25 : 1));
+    this.maybeInjure(o, 0.0035 * force);
+    if (o.injured) o.downT = 0;
+    if (this.rng.chance(0.009)) this.foul(this.rng.chance(0.45) ? 'face_mask' : 'unnecessary_roughness', o);
     if (helpers) {
       const h = (c.side === 'O' ? this.def : this.off).find((x) => x !== o && !x.down && Math.hypot(x.x - c.x, x.y - c.y) < 1.8);
       if (h) this.st.tacklers.push(h);
@@ -723,6 +809,10 @@ function buildScrimmageResult(sim, outcome, spotX) {
   const nm = (a) => shortName(a?.p);
   const dirWord = (y) => (y > MID_Y + 6 ? 'left' : y < MID_Y - 6 ? 'right' : 'middle');
   let yds;
+  if (outcome === 'presnap') {
+    res.kind = 'penalty'; res.elapsed = 0; res.clockStops = true; res.desc = '';
+    return res;
+  }
   if (st.kneel) {
     res.kind = 'kneel';
     res.spotX = los - 1;

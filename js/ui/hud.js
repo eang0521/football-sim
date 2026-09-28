@@ -70,8 +70,12 @@ export class Hud {
   showResult(sim) {
     const r = sim.result;
     const b = $('banner');
-    b.className = 'result' + (r.td || r.safety || (r.good && sim.meta.type === 'fg') ? ' score' : r.turnover ? ' turnover' : '');
-    $('banner-top').textContent = r.desc;
+    const g = this.game;
+    const entry = g.log.slice().reverse().find((e) => e.prefix);
+    const flagged = sim.fouls && sim.fouls.length;
+    b.className = 'result' + (r.td || r.safety || (r.good && sim.meta.type === 'fg') ? ' score' : r.turnover ? ' turnover' : flagged ? ' flag' : '');
+    const text = entry && entry.label === sim.meta.label ? entry.text : r.desc;
+    $('banner-top').innerHTML = (flagged ? '<span class="flagtag">FLAG</span>' : '') + esc(text);
     const T = this.game.stats.team;
     $('banner-sub').textContent = '';
   }
@@ -145,6 +149,7 @@ export function renderBoxScore(game) {
     ${tsRow('3rd down', `${A.thirdConv}/${A.thirdAtt}`, `${H.thirdConv}/${H.thirdAtt}`)}
     ${tsRow('4th down', `${A.fourthConv}/${A.fourthAtt}`, `${H.fourthConv}/${H.fourthAtt}`)}
     ${tsRow('Turnovers', A.turnovers, H.turnovers)}
+    ${tsRow('Penalties–yds', `${A.penalties}-${A.penYds}`, `${H.penalties}-${H.penYds}`)}
     ${tsRow('Possession', top(A.top), top(H.top))}
   </div>`;
   const cols = {
@@ -169,7 +174,14 @@ export function renderBoxScore(game) {
     return `<div><div class="teamhdr"><i class="swatch" style="background:${t.colors.primary}"></i>${esc(t.city)} ${esc(t.name)}</div>` +
       ['pass', 'rush', 'rec', 'def', 'kick', 'punt', 'ret'].map((c) => `<div class="box-sec">${table(k, c)}</div>`).join('') + '</div>';
   };
-  return `${line}<div class="box-sec"><h3>Team stats</h3>${teamStats}</div><div class="box-top">${side('away')}${side('home')}</div>`;
+  const inj = [...(game.injuries?.values() || [])];
+  const injHtml = inj.length ? `<div class="box-sec"><h3>Injuries</h3><div class="injlist">${inj.map((i) => {
+    const t = game.teams[i.team];
+    const back = i.returnAt !== Infinity && game.snapCount >= i.returnAt;
+    return `<div><i class="swatch" style="background:${t.colors.primary}"></i> ${esc(t.abbr)} #${i.p.num} ${esc(i.p.first[0])}. ${esc(i.p.last)} (${i.p.pos}) — ${i.part}, ` +
+      `<span class="${i.returnAt === Infinity ? 'out' : ''}">${back ? 'returned' : i.returnAt === Infinity ? 'out for the game' : 'out'}</span> <span style="color:var(--muted)">(Q${Math.min(i.q, 4)})</span></div>`;
+  }).join('')}</div></div>` : '';
+  return `${line}<div class="box-sec"><h3>Team stats</h3>${teamStats}</div>${injHtml}<div class="box-top">${side('away')}${side('home')}</div>`;
 }
 
 function rating(r) {

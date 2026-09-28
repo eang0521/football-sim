@@ -328,6 +328,9 @@ export class FieldRenderer {
     this.ballShadow.position.set(bw.x, 0.025, bw.z);
     this.ballShadow.scale.setScalar(1 / (1 + B.z * 0.15));
 
+    // penalty flags on the turf where the foul happened
+    this.updateFlags(sim, dir);
+
     // fade play art after the snap
     if (this.art.children.length) {
       let op = 1;
@@ -339,6 +342,30 @@ export class FieldRenderer {
 
     this.updateCamera(sim, dt);
     this.renderer.render(this.scene, this.camera);
+  }
+
+  updateFlags(sim, dir) {
+    if (!this.flagGroup) {
+      this.flagGroup = new THREE.Group();
+      this.scene.add(this.flagGroup);
+      this.flagGeo = new THREE.BoxGeometry(0.6, 0.05, 0.5);
+      this.flagMat = new THREE.MeshStandardMaterial({ color: 0xffd600, roughness: 0.6, emissive: 0x332a00 });
+    }
+    const fouls = (sim.fouls || []).filter((f) => sim.phase === 'dead' || sim.t >= f.t + 0.25);
+    while (this.flagGroup.children.length < fouls.length) {
+      const m = new THREE.Mesh(this.flagGeo, this.flagMat);
+      m.castShadow = true;
+      this.flagGroup.add(m);
+    }
+    this.flagGroup.children.forEach((m, i) => {
+      const f = fouls[i];
+      m.visible = !!f;
+      if (!f) return;
+      // flags are thrown a couple yards from the infraction
+      const w = toWorld(f.x + ((i * 37) % 5 - 2) * 0.4, f.y + 1.2, dir);
+      m.position.set(w.x, 0.04, w.z);
+      m.rotation.y = i * 1.3;
+    });
   }
 
   updateLabel(a, m) {

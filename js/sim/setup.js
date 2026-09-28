@@ -11,7 +11,10 @@ const FALLBACK = {
 };
 
 export class Picker {
-  constructor(team) { this.d = depthChart(team); this.used = new Set(); }
+  constructor(team, unavailable) {
+    this.d = depthChart(team);
+    this.used = new Set(unavailable || []); // injured players are never picked
+  }
   take(pos) {
     for (const p2 of FALLBACK[pos] || [pos]) {
       const pl = (this.d[p2] || []).find((p) => !this.used.has(p.id));
@@ -79,7 +82,7 @@ export function setupScrimmage(sim, cfg) {
   const { offTeam, defTeam, offCall, defCall, los, ballY } = cfg;
   const form = FORMATIONS[offCall.formation];
   const f = offCall.flip ? -1 : 1;
-  const op = new Picker(offTeam);
+  const op = new Picker(offTeam, cfg.unavailable);
   const O = {};
   // OL: best five, assign by order
   const olOrder = ['LT', 'RT', 'C', 'LG', 'RG'];
@@ -105,7 +108,7 @@ export function setupScrimmage(sim, cfg) {
 
   // ---- Defense personnel ----
   const front = FRONTS[defCall.front];
-  const dp = new Picker(defTeam);
+  const dp = new Picker(defTeam, cfg.unavailable);
   const D = {};
   // priority order so starters go to the key slots
   const order = ['DE_L', 'DE_R', 'DT_L', 'DT_R', 'NT', 'MIKE', 'WILL', 'SAM', 'CB_L', 'CB_R', 'NB', 'DB', 'FS', 'SS'];
