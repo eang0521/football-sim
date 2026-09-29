@@ -221,7 +221,9 @@ function coachFrom(name, ts, abbr) {
   };
   if (ts) {
     const pa = ts['passing.passingAttempts'] || 0, ra = ts['rushing.rushingAttempts'] || 0, sk = ts['passing.sacks'] || 0;
-    if (pa + ra > 0) c.passRate = r2(clamp((pa + sk) / (pa + sk + ra), 0.45, 0.68));
+    // passRate is the neutral-situation tendency; overall shares run ~5 points higher
+    // because of 3rd-and-long and trailing-late passing, which the play-caller adds itself
+    if (pa + ra > 0) c.passRate = r2(clamp((pa + sk) / (pa + sk + ra) - 0.05, 0.45, 0.66));
     c.aggression = r2(0.2 + 0.65 * lerp01(ts['miscellaneous.fourthDownAttempts'] || 18, 10, 34));
     if (pa > 0) c.deepShot = r2(0.2 + 0.6 * lerp01((ts['passing.passingBigPlays'] || 0) / pa, 0.05, 0.11));
     const plays = ts['passing.totalOffensivePlays'] || ts['rushing.totalOffensivePlays'];
@@ -232,7 +234,8 @@ function coachFrom(name, ts, abbr) {
 
 // The sim was tuned on its generated leagues. Madden's scale runs higher and unevenly by position
 // (defensive speed and tackling especially), so map each rating per position onto the generated
-// league's scale: NFL starters get the generated starters' mean and spread. Order is preserved.
+// league's scale: NFL starters get the generated starters' mean and (at most) their spread, since
+// the sim is tuned for generated talent ranges and overreacts to stretched extremes. Order is preserved.
 const STARTERS = { QB: 1, RB: 1, FB: 1, WR: 3, TE: 1, OL: 5, DE: 2, DT: 2, LB: 3, CB: 3, S: 2, K: 1, P: 1 };
 function ratingStats(teams, rank) {
   const acc = {};
@@ -256,7 +259,7 @@ function calibrate(teams) {
     for (const k of RATING_KEYS) {
       const a = src[p.pos]?.[k], b = ref[p.pos]?.[k];
       if (!a || !b) continue;
-      p.ratings[k] = clampR(b.m + (p.ratings[k] - a.m) * Math.max(0.6, Math.min(1.6, b.sd / a.sd)));
+      p.ratings[k] = clampR(b.m + (p.ratings[k] - a.m) * Math.max(0.6, Math.min(0.85, b.sd / a.sd)));
     }
     p.ovr = computeOvr(p);
     // Madden's OVR is the better judge of who starts; keep its order but let rating edits still move players.

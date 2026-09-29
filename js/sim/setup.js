@@ -12,7 +12,7 @@ const FALLBACK = {
 };
 
 // Fatigue at which a starter comes off for a breather (if a fresher backup exists).
-const ROTATE_AT = { DE: 0.74, DT: 0.74, RB: 0.72, FB: 0.62, LB: 0.6, CB: 0.55, S: 0.55, WR: 0.52, TE: 0.56, OL: 0.42, QB: 0, K: 0, P: 0 };
+const ROTATE_AT = { DE: 0.74, DT: 0.74, RB: 0.76, FB: 0.62, LB: 0.6, CB: 0.55, S: 0.55, WR: 0.52, TE: 0.56, OL: 0.42, QB: 0, K: 0, P: 0 };
 
 export class Picker {
   constructor(team, unavailable) {
@@ -341,23 +341,31 @@ function assignRunBlocks(sim, cfg) {
   }
   const shift = scheme === 'power' ? -s * 1.1 : s * 1.2;
   const cost = (b, d) => Math.abs(d.y - (b.y + shift)) + (d.x - los) * 0.4;
-  const assign = (pool, targets) => {
+  const assign = (pool, targets, maxCost = 6) => {
     const pairs = [];
     for (const b of pool) for (const d of targets) pairs.push([cost(b, d), b, d]);
     pairs.sort((a, b) => a[0] - b[0]);
     const usedB = new Set(), usedD = new Set();
     for (const [c, b, d] of pairs) {
-      if (usedB.has(b) || usedD.has(d) || c > 6) continue;
+      if (usedB.has(b) || usedD.has(d) || c > maxCost) continue;
       usedB.add(b); usedD.add(d); b.d.target = d; taken.set(d, b);
     }
     return pool.filter((b) => !usedB.has(b));
   };
-  let free = assign(blockers, dl);
+  let free = assign(blockers, dl, 9); // every lineman in the box gets a hat if possible
   free = assign(free, lbs);
-  // leftovers double-team nearest DL
+  // leftovers double-team the most dangerous nearby DL (the one who'd wreck the play one-on-one)
+  const doubled = new Set();
   for (const b of free) {
-    let best = null, bd = 1e9;
-    for (const d of dl) { const c = Math.abs(d.y - b.y); if (c < bd) { bd = c; best = d; } }
+    let best = null, bs = -1e9;
+    for (const d of dl) {
+      const lat = Math.abs(d.y - b.y);
+      if (lat > 4) continue;
+      const sc = (d.r.rds + d.r.str) / 2 - lat * 3 - (doubled.has(d) ? 20 : 0);
+      if (sc > bs) { bs = sc; best = d; }
+    }
+    if (!best) for (const d of dl) if (!best || Math.abs(d.y - b.y) < Math.abs(best.y - b.y)) best = d;
+    if (best) doubled.add(best);
     b.d.target = best;
   }
   const unblocked = box.filter((d) => !taken.has(d));

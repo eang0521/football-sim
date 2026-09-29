@@ -4,7 +4,7 @@ import { clamp } from '../util/vec.js';
 
 // ctx (offense perspective): { down, toGo, ballOn, quarter, clock, scoreDiff, twoMin, isConversion }
 export function passProbability(coach, ctx) {
-  let p = coach.passRate - 0.1;
+  let p = coach.passRate - 0.16;
   const { down, toGo, ballOn, quarter, clock, scoreDiff } = ctx;
   if (down === 1) p += toGo > 10 ? 0.15 : 0;
   if (down === 2) p += toGo >= 8 ? 0.14 : toGo <= 3 ? -0.14 : 0;

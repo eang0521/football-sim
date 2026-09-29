@@ -110,6 +110,7 @@ tools/               Node harnesses for tuning realism
 - `tools/weatherdiag.mjs`: scoring and turnovers by weather type
 - `tools/snapdiag.mjs`: snap shares by depth-chart slot (rotation check)
 - `tools/seasondiag.mjs`: simulates a full season
+- `tools/nflseason.mjs [league.json]`: simulates a full season in parallel worker threads (about 2 minutes for the NFL league) and compares stat leaders, 1,000-yard and 10-sack counts, and sack and TFL distributions by position with NFL norms
 
 ## Real NFL league (private)
 

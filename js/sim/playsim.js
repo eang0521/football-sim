@@ -460,8 +460,10 @@ export class PlaySim {
         t.vx = dT.x * sp; t.vy = dT.y * sp;
       } else {
         const nx = fx / wSum, ny = fy / wSum;
-        const sp = Math.min(2.4, Math.hypot(nx, ny) * 3.6);
         const u = norm(nx, ny);
+        // linemen who win a run block get a yard of penetration, not a free walk into the backfield
+        const intoBackfield = u.x * attackDir(t.blockers[0]) < 0 && (t.fpos === 'DT' || t.fpos === 'DE');
+        const sp = Math.min(intoBackfield ? 1.1 : 2.4, Math.hypot(nx, ny) * 3.6);
         t.vx = u.x * sp; t.vy = u.y * sp;
       }
       t.x += t.vx * dt; t.y += t.vy * dt;
@@ -481,10 +483,15 @@ export class PlaySim {
       });
       // shed
       const engTime = this.t - (t.engT ?? this.t);
-      let lam = (passMode ? 0.19 : 0.13) * Math.exp((tSkill - bestB) / 18) / (1 + 1.8 * (n - 1));
+      // Interior rushers work in a phone booth against help; edge rushers have room to win.
+      // Blocks in space on linebackers and DBs don't last as long as those at the line.
+      const slotK = t.fpos === 'DT' ? (passMode ? 0.6 : 0.55) : t.fpos === 'DE' ? (passMode ? 1.15 : 1) : passMode ? 1 : 1.8;
+      let lam = (passMode ? 0.255 : 0.115) * slotK * Math.exp((tSkill - bestB) / 18) / (1 + 1.8 * (n - 1));
       if (engTime < (passMode ? 0.45 : 0.8)) lam *= 0.25;
       if (passMode) lam *= 1 + Math.max(0, engTime - 1.8) * 0.5;
-      if (c && c !== this.qb() && Math.hypot(c.x - t.x, c.y - t.y) < 1.8) lam *= 1.8;
+      // near the ball carrier a defender fights off the block; in space that's much easier
+      const lineman = t.fpos === 'DT' || t.fpos === 'DE';
+      if (c && c !== this.qb() && Math.hypot(c.x - t.x, c.y - t.y) < (lineman ? 1.8 : 2.8)) lam *= lineman ? 1.8 : 5;
       if (t.blockers.some((b) => b.d.escort)) lam *= 2.5;
       if (this.rng.next() < lam * dt) {
         // a beaten blocker sometimes grabs instead of letting go: holding
@@ -614,6 +621,9 @@ export class PlaySim {
     const deflect = (d) => { this.st.pbu = d; this.whistle('incomplete', this.los); B.vx *= -0.3; B.vy = rng.normal(0, 3); B.vz = 2; };
     if (first.a.side === 'D') {
       const d = first.a;
+      // an underneath defender in the throwing lane, away from the receiver: QBs throw over and
+      // around these, so the ball usually gets by him
+      if (P.target && Math.hypot(d.x - P.target.x, d.y - P.target.y) > 3 && rng.chance(0.6)) { P.ignore.add(d); return; }
       const contested = offNear.length && offNear[0].d < 1.2;
       let pInt = (0.07 + d.r.cth / 100 * 0.17 + (d.r.awr - 70) / 600) * (hasTrait(d.p, 'ball_hawk') ? 1.4 : 1);
       if (contested) pInt *= 0.55;
@@ -644,12 +654,12 @@ export class PlaySim {
       const phase = n.d <= rD + 0.25 ? 1 : 0.3;
       // a trailing defender who grabs to recover: pass interference
       if (phase < 1 && n.d < 1.3 && airY > 6 && rng.chance(0.07 * (airY > 18 ? 1.6 : 1))) this.foul('dpi', d, B.x, B.y);
-      const pPlay = (0.08 + skill * 0.34) * (1 - (n.d / R) ** 2) * tracking * depthK * phase;
+      const pPlay = (0.09 + skill * 0.36) * (1 - (n.d / R) ** 2) * tracking * depthK * phase;
       if (rng.chance(pPlay)) {
         // contact at the catch point: pass interference (worse if not looking back for the ball)
         if (airY > 4 && n.d < 1.2 && rng.chance((tracking < 1 ? 0.45 : 0.2) * (airY > 18 ? 1.5 : 1))) {
           this.foul('dpi', d, B.x, B.y);
-        } else if (rng.chance((0.08 + d.r.cth / 100 * 0.14) * (hasTrait(d.p, 'ball_hawk') ? 1.5 : 1)) && inBounds) return this.interception(d);
+        } else if (rng.chance((0.1 + d.r.cth / 100 * 0.17) * (hasTrait(d.p, 'ball_hawk') ? 1.5 : 1)) && inBounds) return this.interception(d);
         this.st.pbu = d;
         this.whistle('incomplete', this.los);
         B.vz = 2; B.vy += rng.normal(0, 3);
@@ -736,10 +746,15 @@ export class PlaySim {
           if (Math.hypot(mx, my) < d - 0.15) continue;
         }
       }
+      // a blocked lineman can only reach out for a runner who comes right by him;
+      // a blocked linebacker or DB can come off the block to make the play
+      const tied = o.engaged || o.blockers.length;
+      const dl = o.fpos === 'DT' || o.fpos === 'DE';
+      if (tied && dl && d > 0.9) continue;
       o.tackleCD = this.t + 0.4;
       const elus = c.r.btk * 0.55 + c.r.str * 0.2 + c.r.agi * 0.25;
       let p = 0.88 + (o.r.tak - elus) / 150;
-      if (o.engaged || o.blockers.length) p *= 0.3;
+      if (tied) p *= dl ? 0.05 : 0.45;
       if (this.st.fake && this.t < 1.0) p *= 0.3; // still in rush / return mode on a fake
       const behind = (o.x - c.x) * dirC < -0.3;
       const oSpd = Math.hypot(o.vx, o.vy);

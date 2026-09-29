@@ -129,7 +129,7 @@ function runnerThink(sim, a) {
     if (dx > 0 && d < 2.0 && !R.juked?.[o.uid]) {
       R.juked = R.juked || {};
       R.juked[o.uid] = true;
-      const p = (0.03 + Math.max(0, (a.r.agi + a.r.btk) / 200 - 0.65) * 0.4 - Math.max(0, o.r.awr - 70) / 800) * (hasTrait(a.p, 'elusive') ? 1.6 : 1);
+      const p = clamp((0.025 + Math.max(0, (a.r.agi + a.r.btk) / 200 - 0.7) * 0.35 - Math.max(0, o.r.awr - 70) / 800) * (hasTrait(a.p, 'elusive') ? 1.3 : 1), 0, 0.13);
       if (sim.rng.chance(p)) {
         o.d.jukedT = sim.t;
         o.stun = Math.max(o.stun, 0.35);
@@ -285,6 +285,13 @@ function qbPass(sim, qb) {
       P.prog = [...first, ...P.prog.slice(3)];
       P.readBonus = 0.9;
     }
+    // Offenses scheme their best receiver open: he's often the first read.
+    const early = P.prog.slice(0, 3);
+    const star = early.slice().sort((a, b) => recvTrust(sim.bySlotO[b]) - recvTrust(sim.bySlotO[a]))[0];
+    if (star && star !== P.prog[0] && !P.tell) {
+      const gap = recvTrust(sim.bySlotO[star]) - recvTrust(sim.bySlotO[P.prog[0]]);
+      if (gap > 0 && sim.rng.chance(Math.min(0.7, 0.2 + gap * 0.04))) P.prog = [star, ...P.prog.filter((l) => l !== star)];
+    }
     if (P.hot) P.minRead = Math.min(P.minRead, 0.7);
   }
   if (P.throwing) { goTo(qb, qb.x, qb.y, 0.5); return; }
@@ -341,7 +348,7 @@ function qbPass(sim, qb) {
     let ev = evaluateTarget(sim, qb, r);
     const waiting = ev && ev.notReady;
     if (waiting) ev = null;
-    let thr = (P.drop === 'quick' ? 0.24 : 0.46) + style - timeSet * 0.1 - pressure * 0.25;
+    let thr = (P.drop === 'quick' ? 0.24 : 0.46) + style - timeSet * 0.1 - pressure * 0.25 - favor(sim, r);
     if (ev && sim.ctx?.down >= 3 && ev.c.x < toGoX - 0.3 && P.ri < prog.length - 1) thr += 0.3;
     if (ev && ev.c.x - sim.los > 18) thr += (sim.cfg.weather?.windMph ?? 0) * 0.01 + (0.5 + (ev.c.x - sim.los - 18) * 0.03) * (hasTrait(qb.p, 'gunslinger') ? 0.6 : hasTrait(qb.p, 'game_manager') ? 1.4 : 1);
     if (ev && ev.score + noise() > thr) { P.path = 'read'; return startThrow(sim, qb, ev); }
@@ -358,7 +365,7 @@ function qbPass(sim, qb) {
       const ev = evaluateTarget(sim, qb, r);
       if (!ev || ev.notReady) continue;
       const air = ev.c.x - los;
-      let val = ev.score + noise() + Math.min(air, 15) * 0.03 - Math.max(0, air - 18) * 0.05;
+      let val = ev.score + noise() + Math.min(air, 15) * 0.03 - Math.max(0, air - 18) * 0.05 + favor(sim, r);
       // on 3rd/4th down a throw that reaches the marker is worth more than a safe checkdown
       if (sim.ctx?.down >= 3) val += ev.c.x >= toGoX - 0.5 ? (mustConvert(sim) ? 0.4 : 0.22) : -0.12;
       if (!best || val > best.val) best = { ...ev, val };
@@ -384,6 +391,22 @@ function qbPass(sim, qb) {
     }
     if (late && timeSet > 2.4) { P.ri = 0; }
   }
+}
+
+// How good a receiver is at getting open and catching it: hands, routes, speed.
+function recvTrust(r) {
+  if (!r || r.role !== 'route') return 0;
+  return r.r.cth * 0.4 + r.r.rte * 0.4 + r.r.spd * 0.2;
+}
+// QBs lean toward their best receivers: a bonus relative to the others out on this play
+// (zero-sum, so it moves targets around without making the QB more aggressive overall).
+function favor(sim, r) {
+  const P = sim.pass;
+  if (P.trustMean == null) {
+    const rs = sim.off.filter((o) => o.role === 'route');
+    P.trustMean = rs.length ? rs.reduce((s, o) => s + recvTrust(o), 0) / rs.length : 0;
+  }
+  return clamp((recvTrust(r) - P.trustMean) * 0.008, -0.08, 0.08);
 }
 
 function scrambleLane(sim, qb) {
@@ -757,6 +780,18 @@ function zoneThink(sim, a) {
   if (sim.runRead(a)) return pursue(sim, a, sim.carrierAgent());
   const z = a.d.zone;
   if (!z) return;
+  // Run fit: run blocking up front tells the defense it's a run before the handoff, so zone
+  // defenders come downhill toward the run side (RPOs and options are built to punish this).
+  const R = sim.run;
+  if (sim.isRun && R && !R.rpo && !R.option && R.scheme !== 'draw' && !sim.carrierAgent()?.d.runner) {
+    const deep = !!z.deep;
+    if (sim.t > 0.3 + (100 - a.r.awr) / 250 + (deep ? 0.15 : 0)) {
+      const fx = deep ? Math.max(sim.los + 6, a.x - 3) : sim.los + 2.5;
+      goTo(a, fx, a.y + (R.holeY - a.y) * (deep ? 0.35 : 0.5), a.maxSpd * (deep ? 0.6 : 0.8), true);
+      a.faceTo = sim.qb();
+      return;
+    }
+  }
   const qb = sim.qb();
   const threats = sim.off.filter((o) => o.role === 'route' && !o.down);
   let tx = z.x, ty = z.y;
