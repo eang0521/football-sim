@@ -6,11 +6,10 @@ import { RNG } from '../util/rng.js';
 function migrate(lg) {
   lg.teams.forEach((t) => t.roster.forEach((p) => {
     p.ovr = computeOvr(p);
-    if (!Array.isArray(p.traits)) {
-      let h = 0;
-      for (const ch of p.id) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
-      p.traits = rollTraits(new RNG(h || 1), p.pos, p.ovr);
-    }
+    let h = 0;
+    for (const ch of p.id) h = (h * 31 + ch.charCodeAt(0)) >>> 0;
+    if (!Array.isArray(p.traits)) p.traits = rollTraits(new RNG(h || 1), p.pos, p.ovr);
+    if (p.dur == null) p.dur = Math.round(Math.max(45, Math.min(99, new RNG((h ^ 0x9e37) || 7).normal(78, 9))));
   }));
 }
 

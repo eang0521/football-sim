@@ -4,9 +4,11 @@ import { clamp } from '../util/vec.js';
 import { PlaySim } from './playsim.js';
 import { callOffense, callDefense } from './playcaller.js';
 import { FORMATIONS } from './playbook.js';
+import { winProb, conversionProb } from './winprob.js';
+import { finishRecording } from './replay.js';
 import { fgProbability } from './special.js';
 import { Stats } from './stats.js';
-import { depthChart } from '../data/teamgen.js';
+import { depthChart, teamRatings } from '../data/teamgen.js';
 import { FOULS, rollPreSnap, enforce, stateValue, describeFoul } from './penalties.js';
 import { makeWeather, describeWeather, effectiveKickDist } from './weather.js';
 import { FIELD_W, MID_Y, HASH_L, HASH_R, QUARTER_LEN, OT_LEN } from './constants.js';
@@ -40,7 +42,7 @@ export class Game {
     for (const t of [home, away]) for (const p of t.roster) this.energy.set(p.id, 1);
     this.momentum = 0;         // -1 (away) .. +1 (home)
     this.weather = makeWeather(opts.weather || 'random', this.rng);
-    const blankT = () => ({ run: { n: 0, s: 0 }, pass: { n: 0, s: 0 }, concept: {} });
+    const blankT = () => ({ run: { n: 0, s: 0 }, pass: { n: 0, s: 0 }, concept: {}, form: {} });
     this.tend = { home: blankT(), away: blankT() };  // in-game success by play type / concept
     this.challenges = { home: 2, away: 2 };
     this.preOut = opts.out || new Set(); // players already hurt coming into the game (season mode)
@@ -73,10 +75,12 @@ export class Game {
     const diff = s.score[key] - s.score[other(key)];
     const q = s.quarter;
     const twoMin = (q === 2 && s.clock <= 120) || (q >= 4 && ((s.clock <= 150 && diff <= 0) || (s.clock <= 300 && diff < -8)));
+    // last snap of a half from beyond field-goal range: throw it up
+    const hail = s.clock <= 8 && s.ballOn >= 38 && s.ballOn < 75 && (q === 2 || (q === 4 && diff < 0 && diff >= -8));
     return {
       down: s.down, toGo: s.toGo, ballOn: s.ballOn, quarter: q, clock: s.clock, scoreDiff: diff, twoMin,
       timeouts: s.timeouts[key],
-      defPrevent: false,
+      defPrevent: false, hail,
     };
   }
   kicker(key) { return depthChart(this.teams[key]).K[0] || depthChart(this.teams[key]).P[0]; }
@@ -114,7 +118,7 @@ export class Game {
     } else {
       const off = s.poss, def = other(off);
       const ctx = this.ctxFor(off);
-      const defCtx = { ...ctx, scoreDiff: -ctx.scoreDiff, defPrevent: -ctx.scoreDiff > 3 && s.quarter >= 4 && s.clock < 150 };
+      const defCtx = { ...ctx, scoreDiff: -ctx.scoreDiff, defPrevent: ctx.hail || (-ctx.scoreDiff > 3 && s.quarter >= 4 && s.clock < 150) };
       const decision = this.decide(off, ctx);
       const base = { offTeam: this.teams[off], defTeam: this.teams[def], los: s.ballOn, ballY: s.ballY };
       const aggr = this.teams[off].coach.aggression;
@@ -142,12 +146,14 @@ export class Game {
         cfg = { ...base, kind, offCall, defCall, firstDownX: s.ballOn + s.toGo, ctx: { ...ctx, wantOOB, oobSide: 'O' },
           spike: decision === 'spike', intSafety: decision === 'safety' };
         meta = { type: kind === 'kneel' ? 'kneel' : 'scrimmage', off, def, offCall, defCall,
-          label: special ? offCall.name : `${offCall.name}${offCall.motion ? ' (motion)' : ''} vs ${defCall.name}`,
+          label: special ? offCall.name : `${FORMATIONS[offCall.formation].name.replace(/ \(\d+\)$/, '')} (${FORMATIONS[offCall.formation].personnel}): ${offCall.name}${offCall.motion ? ' (motion)' : ''} vs ${defCall.name}`,
           down: s.down, toGo: s.toGo, ballOn: s.ballOn, fourth: s.down === 4 };
       }
     }
     meta.dir = this.dirOf(meta.off);
     cfg.energy = this.energy;
+    cfg.record = !!this.recording;
+    if (this.recording) meta.wp0 = this.wpHome();
     cfg.weather = this.weather;
     cfg.dir = meta.dir;
     cfg.mod = (p, side) => this.ratingMod(p, side === 'O' ? meta.off : meta.def);
@@ -194,7 +200,7 @@ export class Game {
       const burn = plays * 1.5 + (plays - 1) * 40 - Math.min(defTO, plays - 1) * 40;
       if (clock <= burn + 1) return 'kneel';
     }
-    if (q === 2 && clock <= 25 && s.ballOn < 55 && diff >= 0) return 'kneel';
+    if (q === 2 && clock <= 25 && !ctx.hail && (s.ballOn < 45 || (clock <= 8 && s.ballOn < 55)) && (diff >= 0 || s.ballOn < 35)) return 'kneel';
     const fgDist = 117 - s.ballOn;
     const pFG = Math.max(0, fgProbability(this.kicker(off), effectiveKickDist(this.weather, fgDist, this.dirOf(off))) - this.weather.fgPen);
     // end-of-half kicks on any down
@@ -203,27 +209,67 @@ export class Game {
     const late = q >= 4;
     const desperate = late && ((diff < 0 && clock < 150) || (diff < -3 && clock < 330) || (diff < -8 && clock < 520) || (diff < -16 && clock < 800));
     if (desperate && !(diff >= -3 && pFG > 0.5 && clock < 60)) return 'play';
+    // 4th down: compare win probability after going for it, kicking, and punting.
+    const W = this.fourthDownWP(off, pFG);
     const agg = coach.aggression;
-    let go;
-    if (s.toGo <= 1) go = 0.3 + agg * 0.55 + (s.ballOn >= 50 ? 0.15 : 0) - (s.ballOn < 30 ? 0.35 : 0);
-    else if (s.toGo <= 3) go = agg * 0.45 * (s.ballOn >= 45 ? 1 : 0.25);
-    else if (s.toGo <= 6) go = agg * 0.12;
-    else go = 0.01;
-    if (late && diff < 0) go += 0.15;
-    if (late && diff > 0) go -= 0.2;
-    go = clamp(go, 0, 0.95);
-    if (pFG >= 0.45 && s.ballOn >= 55) return this.rng.chance(go * (s.toGo <= 2 ? 0.8 : 0.3)) ? 'play' : 'fg';
-    if (s.ballOn >= 58) return this.rng.chance(Math.max(go, 0.2 + agg * 0.4)) ? 'play' : (pFG > 0.3 ? 'fg' : 'punt');
-    return this.rng.chance(go) ? 'play' : 'punt';
+    // Coaches still lean conservative: going for it needs a clear edge in win probability,
+    // a smaller one for aggressive coaches. Otherwise kick or punt, whichever is better.
+    const kick = W.fg != null && W.fg >= W.punt ? 'fg' : 'punt';
+    const kickWP = kick === 'fg' ? W.fg : W.punt;
+    const need = 0.03 - agg * 0.025 + this.rng.normal(0, 0.004);
+    const pick = desperate || W.go - kickWP > need ? 'play' : kick;
+    if (pick === 'play' && !desperate) {
+      const alt = W.fg != null && W.fg >= W.punt ? ['a field goal', W.fg] : ['a punt', W.punt];
+      const pc = (x) => `${Math.round(x * 100)}%`;
+      this.addLog('info', `${this.teams[off].name} keep the offense on the field on 4th & ${s.toGo}: win probability ${pc(W.go)} going for it vs ${pc(alt[1])} with ${alt[0]}.`);
+    }
+    return pick;
   }
 
+  secsLeft() {
+    const s = this.s;
+    return s.quarter <= 4 ? s.clock + (4 - s.quarter) * this.qLen : s.clock;
+  }
+
+  // Win probability for the offense, from the offense's point of view, after a score / change of possession.
+  wpAfterPossessionChange(off, diff, oppBallOn, secs) {
+    const def = other(off), s = this.s;
+    return 1 - winProb({ diff: -diff, secs, ballOn: oppBallOn, toOff: s.timeouts[def], toDef: s.timeouts[off] });
+  }
+
+  fourthDownWP(off, pFG) {
+    const s = this.s, def = other(off);
+    const diff = s.score[off] - s.score[def];
+    const secs = Math.max(0, this.secsLeft() - 6);
+    const tr = (k) => teamRatings(this.teams[k]);
+    const edge = clamp((tr(off).off - tr(def).def) * 0.008, -0.08, 0.08);
+    const pConv = clamp(conversionProb(s.toGo, s.ballOn) + edge, 0.1, 0.85);
+    const goal = s.ballOn + s.toGo >= 100;
+    const wpSucc = goal ? this.wpAfterPossessionChange(off, diff + 7, 30, secs)
+      : winProb({ diff, secs, ballOn: Math.min(99, s.ballOn + s.toGo + 1.5), down: 1, toGo: 10, toOff: s.timeouts[off], toDef: s.timeouts[def] });
+    const wpFail = this.wpAfterPossessionChange(off, diff, 100 - s.ballOn, secs);
+    const go = pConv * wpSucc + (1 - pConv) * wpFail;
+    let fg = null;
+    if (pFG > 0.05) fg = pFG * this.wpAfterPossessionChange(off, diff + 3, 30, secs) + (1 - pFG) * this.wpAfterPossessionChange(off, diff, Math.max(20, 107 - s.ballOn), secs);
+    const land = s.ballOn + 42;
+    const oppAt = land >= 100 ? 20 : land > 92 ? 12 : 100 - land;
+    const punt = this.wpAfterPossessionChange(off, diff, oppAt, secs);
+    return { go, fg, punt, pConv };
+  }
+
+  // Two-point decision by win probability (after the try, the other team gets a kickoff).
   goForTwo(key) {
     const s = this.s;
     const diff = s.score[key] - s.score[other(key)];
-    const lateSet = new Set([-11, -10, -5, -2, 1, 5, 12]);
-    if (s.quarter >= 4 && lateSet.has(diff)) return true;
-    if (s.quarter >= 4 && s.clock < 120 && diff === -1) return this.rng.chance(this.teams[key].coach.aggression * 0.5);
-    return this.rng.chance(0.02 + this.teams[key].coach.aggression * 0.04);
+    const secs = Math.max(0, this.secsLeft() - 5);
+    const wp = (d) => this.wpAfterPossessionChange(key, d, 30, secs);
+    const p2 = 0.48, p1 = 0.95;
+    const two = p2 * wp(diff + 2) + (1 - p2) * wp(diff);
+    const one = p1 * wp(diff + 1) + (1 - p1) * wp(diff);
+    const agg = this.teams[key].coach.aggression;
+    if (two - one > 0.009 - (agg - 0.5) * 0.01 + (secs > 900 ? 0.01 : 0)) return true;
+    // early in games the numbers are close to even; a few aggressive coaches still go
+    return secs > 1200 && this.rng.chance(0.01 + agg * 0.03);
   }
 
   checkQuarterEnd() {
@@ -302,7 +348,49 @@ export class Game {
   }
 
   // ---------- apply a finished play ----------
+  // Home team's win probability in the current state (used for highlights and the scorebug).
+  wpHome() {
+    const s = this.s;
+    if (s.final) return s.score.home > s.score.away ? 1 : s.score.home < s.score.away ? 0 : 0.5;
+    const secs = this.secsLeft();
+    let poss = s.poss, diff, st;
+    if (s.phase === 'kickoff') { poss = other(s.kicking); st = { ballOn: 30 }; }
+    else if (s.phase === 'pat') st = { ballOn: null };
+    else st = { ballOn: s.ballOn, down: s.down, toGo: s.toGo };
+    diff = s.score[poss] - s.score[other(poss)] + (s.phase === 'pat' ? 1 : 0);
+    let wp;
+    if (s.phase === 'pat') wp = 1 - winProb({ diff: -diff, secs, ballOn: 30, toOff: s.timeouts[other(poss)], toDef: s.timeouts[poss] });
+    else wp = winProb({ diff, secs, ...st, toOff: s.timeouts[poss], toDef: s.timeouts[other(poss)] });
+    return poss === 'home' ? wp : 1 - wp;
+  }
+
   applyResult(sim) {
+    const out = this.applyResultCore(sim);
+    if (sim.rec && sim.meta.wp0 != null) this.noteHighlight(sim);
+    return out;
+  }
+
+  // Keep the last few plays for instant replay and the biggest plays of the game for a highlights reel.
+  noteHighlight(sim) {
+    const wp1 = this.wpHome();
+    const res = sim.result || {};
+    const swing = Math.abs(wp1 - sim.meta.wp0);
+    const last = this.log[this.log.length - 1];
+    const gain = res.possession === 'O' && res.spotX != null && sim.meta.pre ? res.spotX - sim.meta.pre.ballOn : 0;
+    const score = swing + (res.td ? 0.08 : 0) + (res.turnover ? 0.06 : 0) + (gain >= 25 ? 0.04 : 0) + (res.kind === 'sack' ? 0.01 : 0);
+    const rec = finishRecording(sim, { desc: last?.text || '', prefix: last?.prefix || '', q: this.s.quarter, clock: this.s.clock, score, wp0: sim.meta.wp0, wp1 });
+    sim.rec = null;
+    if (!rec) return;
+    this.replays = [...(this.replays || []), rec].slice(-3);
+    const H = (this.highlights ||= []);
+    if (sim.meta.type !== 'kneel' && score >= 0.03) {
+      H.push(rec);
+      H.sort((a, b) => b.score - a.score);
+      if (H.length > 10) H.length = 10;
+    }
+  }
+
+  applyResultCore(sim) {
     const res = sim.result, meta = sim.meta, s = this.s;
     const off = meta.off, def = other(off);
     const T = this.stats.team;
@@ -381,6 +469,16 @@ export class Game {
           this.score(off, 3); scored = true;
           s.phase = 'kickoff'; s.kicking = off; s.kickFrom = 35;
           this.endDrive('FG');
+        } else if (res.blocked && res.returnTD) {
+          this.score(def, 6); scored = true;
+          s.poss = def; s.phase = 'pat';
+          this.endDrive('Blocked FG'); this.startDrive(def, 0); this.endDrive('TD');
+        } else if (res.blocked) {
+          // live ball recovered behind the line: the defense takes over there
+          s.poss = def; s.ballOn = clamp(100 - res.recoverX, 1, 99); s.down = 1; s.toGo = 10; s.ballY = MID_Y;
+          changed = true;
+          this.endDrive('Blocked FG');
+          this.startDrive(def, s.ballOn);
         } else {
           s.poss = def; s.ballOn = Math.max(20, 100 - (s.ballOn - 7)); s.down = 1; s.toGo = 10; s.ballY = MID_Y;
           changed = true;
@@ -503,13 +601,13 @@ export class Game {
     let next = null;
     if (offCall.play.kind === 'run' && !offCall.play.rpo && box >= blockers + 2 && ctx.toGo > 1) {
       for (let i = 0; i < 8 && !next; i++) {
-        const c = callOffense(this.teams[off], { ...ctx, down: 3, toGo: 5 }, rng);
-        if (c.play.kind === 'pass' && c.play.depth !== 'deep' && c.play.forms.includes(offCall.formation)) next = { ...c, formation: offCall.formation, flip: offCall.flip };
+        const c = callOffense(this.teams[off], { ...ctx, down: 3, toGo: 5 }, rng, null, { formation: offCall.formation, kind: 'pass' });
+        if (c.play.kind === 'pass' && c.play.depth !== 'deep') next = { ...c, flip: offCall.flip };
       }
     } else if (offCall.play.kind === 'pass' && !offCall.play.screen && box <= blockers - 1 && ctx.toGo <= 4 && ctx.down >= 2) {
       for (let i = 0; i < 8 && !next; i++) {
-        const c = callOffense(this.teams[off], { ...ctx, down: 1, toGo: 2, twoMin: false }, rng);
-        if (c.play.kind === 'run' && !c.play.option && c.play.forms.includes(offCall.formation)) next = { ...c, formation: offCall.formation, flip: offCall.flip };
+        const c = callOffense(this.teams[off], { ...ctx, down: 1, toGo: 2, twoMin: false }, rng, null, { formation: offCall.formation, kind: 'run' });
+        if (c.play.kind === 'run' && !c.play.option) next = { ...c, flip: offCall.flip };
       }
     }
     if (!next) return null;
@@ -575,6 +673,8 @@ export class Game {
     T[k].n++; T[k].s += ok;
     const c = (T.concept[meta.offCall.play.id] ||= { n: 0, s: 0 });
     c.n++; c.s += ok;
+    const f = (T.form[meta.offCall.formation] ||= { run: 0, pass: 0 });
+    f[meta.offCall.play.kind === 'run' ? 'run' : 'pass']++;
   }
 
   adapt(key) {
@@ -583,14 +683,14 @@ export class Game {
     const passAdj = T.run.n + T.pass.n >= 12 ? clamp((sr(T.pass) - sr(T.run)) * 0.6, -0.12, 0.12) : 0;
     const concept = {};
     for (const [id, c] of Object.entries(T.concept)) if (c.n >= 2) concept[id] = clamp(1 + (sr(c) - 0.45) * 1.6, 0.55, 1.6);
-    return { passAdj, concept };
+    return { passAdj, concept, scout: T.form };
   }
 
   oppTend(key) {
     const T = this.tend[key];
     const n = T.run.n + T.pass.n;
     const sr = (x) => (x.s + 2.2) / (x.n + 5);
-    return { n, passRate: n ? T.pass.n / n : 0.55, runSR: sr(T.run), passSR: sr(T.pass) };
+    return { n, passRate: n ? T.pass.n / n : 0.55, runSR: sr(T.run), passSR: sr(T.pass), form: T.form };
   }
 
   halftimeAdjustments() {
@@ -785,8 +885,10 @@ export class Game {
       if (part === 'concussion' || r > 0.72) { status = 'out for the game'; returnAt = Infinity; }
       else if (r > 0.45) { status = 'questionable to return'; returnAt = this.snapCount + rng.int(18, 45); }
       else { status = 'shaken up, will miss a few plays'; returnAt = this.snapCount + rng.int(3, 10); }
-      this.injuries.set(inj.p.id, { team, p: inj.p, part, status, returnAt, returned: returnAt === Infinity, q: this.s.quarter });
-      logs.push(`INJURY: ${this.teams[team].abbr} #${inj.p.num} ${inj.p.first[0]}.${inj.p.last} (${inj.p.pos}), ${part}. ${status[0].toUpperCase() + status.slice(1)}.`);
+      const weeks = injuryWeeks(rng, part, returnAt === Infinity, inj.p.dur ?? 75);
+      this.injuries.set(inj.p.id, { team, p: inj.p, part, status, returnAt, returned: returnAt === Infinity, q: this.s.quarter, weeks });
+      const outlook = weeks >= 99 ? ' Feared to be season-ending.' : weeks >= 4 ? ' Expected to miss significant time.' : '';
+      logs.push(`INJURY: ${this.teams[team].abbr} #${inj.p.num} ${inj.p.first[0]}.${inj.p.last} (${inj.p.pos}), ${part}. ${status[0].toUpperCase() + status.slice(1)}.${outlook}`);
     }
     return logs;
   }
@@ -803,7 +905,8 @@ export class Game {
     if (res.oob) r *= 0.55;
     // timeouts
     const dDiff = -ctx.scoreDiff;
-    if (q >= 4 && s.clock <= 150 && dDiff <= 0 && dDiff >= -16 && s.timeouts[defK] > 0 && s.clock > 5) {
+    const toWindow = dDiff >= -8 ? 150 : 240; // down two scores: start stopping the clock earlier
+    if (q >= 4 && s.clock <= toWindow && dDiff <= 0 && dDiff >= -16 && s.timeouts[defK] > 0 && s.clock > 5) {
       s.timeouts[defK]--; this.addLog('timeout', `Timeout ${this.teams[defK].abbr} (${s.timeouts[defK]} left).`); return;
     }
     if (((q >= 4 && ctx.scoreDiff <= 0 && ctx.scoreDiff >= -16 && s.clock <= 110) || (q === 2 && s.clock <= 40 && s.ballOn >= 40))
@@ -835,4 +938,18 @@ export class Game {
       this.applyResult(sim);
     }
   }
+}
+
+// Weeks an injury costs (0 = day-to-day). Serious ones go to IR (4+); 99 = out for the season.
+export function injuryWeeks(rng, part, outForGame, dur) {
+  if (part === 'concussion') return rng.int(1, 2);
+  if (!outForGame) return rng.chance(0.2) ? 1 : 0;
+  const r = rng.next() * (1.25 - dur / 400); // durable players tend to land on the light end
+  const bad = part === 'knee' ? 1.25 : part === 'ankle' || part === 'hamstring' ? 1.05 : 0.9;
+  const x = r * bad;
+  if (x < 0.3) return 0;
+  if (x < 0.62) return rng.int(1, 2);
+  if (x < 0.85) return rng.int(3, 5);
+  if (x < 0.97) return rng.int(6, 10);
+  return 99;
 }

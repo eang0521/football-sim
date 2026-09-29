@@ -1,7 +1,10 @@
 // Build a private NFL league file from public sources:
 //   - Madden NFL ratings (ea.com ratings pages): rosters, positions, jerseys, size, ratings
-//   - ESPN APIs: team names/colors, head coaches, last season's player and team stats
+//   - ESPN APIs: team names/colors, head coaches, last season's player and team stats,
+//     current rosters and injuries, depth charts (incl. returners) and this season's schedule/results
 // Usage: node tools/import-nfl.mjs [--stats-season 2025] [--refresh]
+// Live data (ratings, rosters, injuries, depth charts, schedule) is cached per day, so running this
+// again on a later day picks up the latest; --refresh re-downloads everything.
 // Output: private/nfl-league.json (gitignored). Import it from Teams → Import league JSON,
 // or use "Load NFL league" when running the site locally. Nothing here is committed or deployed.
 import fs from 'node:fs';
@@ -20,10 +23,12 @@ const STATS_SEASON = +arg('--stats-season', new Date().getMonth() >= 8 ? new Dat
 const COACH_SEASON = STATS_SEASON + 1;
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126 Safari/537.36';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const TODAY = new Date().toISOString().slice(0, 10);
 
 // Cached, polite fetch: one request at a time with a pause, and results reused between runs.
-async function get(url, name, { json = true, pause = 700 } = {}) {
-  const file = path.join(CACHE, name);
+// live: cache for today only (data that changes week to week).
+async function get(url, name, { json = true, pause = 700, live = false } = {}) {
+  const file = path.join(CACHE, live ? name.replace(/(\.\w+)$/, `-${TODAY}$1`) : name);
   if (!REFRESH && fs.existsSync(file)) {
     const txt = fs.readFileSync(file, 'utf8');
     return json ? JSON.parse(txt) : txt;
@@ -48,7 +53,7 @@ async function fetchMadden() {
   const players = [];
   let label = '';
   for (let page = 1; ; page++) {
-    const html = await get(`https://www.ea.com/games/madden-nfl/ratings${page > 1 ? `?page=${page}` : ''}`, `madden-${page}.html`, { json: false, pause: 1200 });
+    const html = await get(`https://www.ea.com/games/madden-nfl/ratings${page > 1 ? `?page=${page}` : ''}`, `madden-${page}.html`, { json: false, pause: 1200, live: true });
     const m = html.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
     if (!m) throw new Error(`Madden page ${page}: no data block (page layout changed?)`);
     const data = JSON.parse(m[1]).props?.pageProps?.ratingDetails;
@@ -110,6 +115,63 @@ async function fetchPlayerStats() {
   return rows;
 }
 
+// Current roster: team, jersey, status group and injury designation for every player.
+async function fetchRoster(team) {
+  const j = await get(`https://site.api.espn.com/apis/site/v2/sports/football/nfl/teams/${team.id}/roster`, `espn-roster-${team.id}.json`, { live: true });
+  const out = [];
+  for (const g of j.athletes || []) for (const a of g.items || []) {
+    out.push({ id: a.id, first: a.firstName, last: a.lastName, jersey: a.jersey != null ? +a.jersey : null, team: team.abbreviation, group: g.position,
+      injury: a.injuries?.[0]?.status || null });
+  }
+  return out;
+}
+
+// ESPN depth chart position -> sim position
+const DEPTH_POS = { qb: 'QB', rb: 'RB', fb: 'FB', wr: 'WR', te: 'TE', lt: 'OL', lg: 'OL', c: 'OL', rg: 'OL', rt: 'OL',
+  lde: 'DE', rde: 'DE', lolb: 'DE', rolb: 'DE', de: 'DE', ldt: 'DT', rdt: 'DT', nt: 'DT', dt: 'DT',
+  wlb: 'LB', mlb: 'LB', slb: 'LB', lilb: 'LB', rilb: 'LB', lb: 'LB', lcb: 'CB', rcb: 'CB', nb: 'CB', cb: 'CB', ss: 'S', fs: 'S', pk: 'K', p: 'P' };
+async function fetchDepth(team) {
+  const ranks = new Map(); // espnId -> { [simPos]: rank, KR, PR }
+  try {
+    const j = await get(`https://sports.core.api.espn.com/v2/sports/football/leagues/nfl/seasons/${COACH_SEASON}/teams/${team.id}/depthcharts`, `espn-depth-${team.id}.json`, { live: true });
+    for (const it of j.items || []) {
+      Object.entries(it.positions || {}).forEach(([key, v], order) => {
+        for (const a of v.athletes || []) {
+          const id = a.athlete?.$ref?.match(/athletes\/(\d+)/)?.[1];
+          if (!id) continue;
+          const r = ranks.get(id) || {};
+          if (key === 'kr' || key === 'pr') r[key.toUpperCase()] = Math.min(r[key.toUpperCase()] ?? 99, a.slot);
+          const pos = DEPTH_POS[key];
+          if (pos) r[pos] = Math.min(r[pos] ?? 999, (a.slot - 1) * 20 + order);
+          ranks.set(id, r);
+        }
+      });
+    }
+  } catch { /* no depth chart: Madden order is used */ }
+  return ranks;
+}
+
+// This season's schedule, with final scores for games already played.
+async function fetchSchedule() {
+  const weeks = [];
+  for (let w = 1; w <= 18; w++) {
+    try {
+      const j = await get(`https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=${COACH_SEASON}&seasontype=2&week=${w}`, `espn-sched-${COACH_SEASON}-${w}.json`, { live: true, pause: 400 });
+      const games = (j.events || []).map((e) => {
+        const c = e.competitions[0];
+        const H = c.competitors.find((x) => x.homeAway === 'home'), A = c.competitors.find((x) => x.homeAway === 'away');
+        const done = !!e.status?.type?.completed;
+        return { home: H.team.abbreviation, away: A.team.abbreviation, date: e.date, final: done,
+          ...(done ? { homeScore: +H.score, awayScore: +A.score, ot: (e.status.period ?? 4) > 4 } : {}) };
+      });
+      if (games.length) weeks.push({ week: w, games });
+      process.stdout.write(`\rESPN ${COACH_SEASON} schedule: week ${w}   `);
+    } catch { break; }
+  }
+  console.log();
+  return weeks;
+}
+
 // ---------- mapping ----------
 const POS = { QB: 'QB', HB: 'RB', FB: 'FB', WR: 'WR', TE: 'TE', LT: 'OL', LG: 'OL', C: 'OL', RG: 'OL', RT: 'OL',
   LEDG: 'DE', REDG: 'DE', LE: 'DE', RE: 'DE', DT: 'DT', MIKE: 'LB', WILL: 'LB', SAM: 'LB', LOLB: 'LB', ROLB: 'LB', MLB: 'LB',
@@ -152,7 +214,7 @@ function mapTraits(st, pos) {
   const c = [];
   const add = (t, score) => { if (score > 0 && TRAITS[t].pos.includes(pos)) c.push([t, score]); };
   if (pos === 'QB') {
-    add('scrambler', v('speed') - 83);
+    add('scrambler', Math.min(v('speed') - 88, v('throwOnTheRun') - 70)); // true runners, not every mobile QB
     add('pocket_passer', Math.min(v('throwUnderPressure') - 88, 80 - v('speed')));
     add('gunslinger', Math.min(v('throwPower') - 93, v('throwAccuracyDeep') - 86));
     add('game_manager', Math.min(v('throwAccuracyShort') - 88, 90 - v('throwPower')));
@@ -221,11 +283,11 @@ function coachFrom(name, ts, abbr) {
   };
   if (ts) {
     const pa = ts['passing.passingAttempts'] || 0, ra = ts['rushing.rushingAttempts'] || 0, sk = ts['passing.sacks'] || 0;
-    // passRate is the neutral-situation tendency; overall shares run ~5 points higher
+    // passRate is the neutral-situation tendency; overall shares run a little higher
     // because of 3rd-and-long and trailing-late passing, which the play-caller adds itself
-    if (pa + ra > 0) c.passRate = r2(clamp((pa + sk) / (pa + sk + ra) - 0.05, 0.45, 0.66));
+    if (pa + ra > 0) c.passRate = r2(clamp((pa + sk) / (pa + sk + ra) - 0.02, 0.47, 0.68));
     c.aggression = r2(0.2 + 0.65 * lerp01(ts['miscellaneous.fourthDownAttempts'] || 18, 10, 34));
-    if (pa > 0) c.deepShot = r2(0.2 + 0.6 * lerp01((ts['passing.passingBigPlays'] || 0) / pa, 0.05, 0.11));
+    if (pa > 0) c.deepShot = r2(0.2 + 0.6 * lerp01((ts['passing.passingBigPlays'] || 0) / pa, 0.06, 0.12));
     const plays = ts['passing.totalOffensivePlays'] || ts['rushing.totalOffensivePlays'];
     if (plays) c.tempo = r2(0.2 + 0.6 * lerp01(plays, 980, 1130));
   }
@@ -241,7 +303,8 @@ function ratingStats(teams, rank) {
   const acc = {};
   for (const t of teams) {
     for (const pos in STARTERS) {
-      const list = t.roster.filter((p) => p.pos === pos).sort((a, b) => rank(b) - rank(a)).slice(0, STARTERS[pos]);
+      // actual starters: the imported depth chart first (as the sim will line them up), then the rank
+      const list = t.roster.filter((p) => p.pos === pos).sort((a, b) => (a.depth ?? 1e4) - (b.depth ?? 1e4) || rank(b) - rank(a)).slice(0, STARTERS[pos]);
       for (const p of list) for (const k of RATING_KEYS) ((acc[pos] ||= {})[k] ||= []).push(p.ratings[k]);
     }
   }
@@ -253,6 +316,9 @@ function ratingStats(teams, rank) {
   return out;
 }
 function calibrate(teams) {
+  const durs = teams.flatMap((t) => t.roster.map((p) => p.dur)).sort((a, b) => a - b);
+  const med = durs[durs.length >> 1];
+  for (const t of teams) for (const p of t.roster) p.dur = clampR(78 + (p.dur - med) * 0.9);
   const ref = ratingStats([1, 2, 3, 4, 5, 6].flatMap((s) => generateLeague(s * 101).teams), (p) => p.ovr);
   const src = ratingStats(teams, (p) => p.madden.ovr);
   for (const t of teams) for (const p of t.roster) {
@@ -261,6 +327,9 @@ function calibrate(teams) {
       if (!a || !b) continue;
       p.ratings[k] = clampR(b.m + (p.ratings[k] - a.m) * Math.max(0.6, Math.min(0.85, b.sd / a.sd)));
     }
+    // Imported traits are earned by these very ratings, so their rating bump would count the skill
+    // twice: take it back out and let the trait add only its behavior.
+    for (const t of p.traits) for (const [k, v] of Object.entries(TRAITS[t]?.bump || {})) p.ratings[k] = clampR(p.ratings[k] - v);
     p.ovr = computeOvr(p);
     // Madden's OVR is the better judge of who starts; keep its order but let rating edits still move players.
     p.madden.adj = p.madden.ovr - p.ovr;
@@ -297,6 +366,7 @@ for (const et of espnTeams) {
     const p = {
       id: `NFL-${m.id}`, first: m.firstName, last: m.lastName, pos, num, height: m.height, weight: m.weight, ratings,
       traits: mapTraits(m.stats, pos), age: m.age, yearsPro: m.yearsPro, college: m.college,
+      dur: clampR(0.6 * (m.stats.injury?.value ?? 80) + 0.4 * (m.stats.toughness?.value ?? 80)),
       madden: { ovr: m.overallRating, pos: m.position.id, archetype: m.archetype?.label || null },
     };
     total++;
@@ -316,19 +386,64 @@ for (const et of espnTeams) {
   });
 }
 console.log();
+
+// ---------- live rosters: trades/signings/cuts, injuries, depth charts ----------
+const espnPlayers = [];
+for (const et of espnTeams) {
+  process.stdout.write(`\rESPN rosters + depth charts: ${et.abbreviation}   `);
+  const roster = await fetchRoster(et);
+  const depth = await fetchDepth(et);
+  for (const r of roster) espnPlayers.push({ ...r, depth: depth.get(r.id) });
+}
+console.log();
+const espnByName = new Map();
+for (const r of espnPlayers) { const k = norm(`${r.first}${r.last}`); if (!espnByName.has(k)) espnByName.set(k, []); espnByName.get(k).push(r); }
+const STATUS = { 'Injured Reserve': 'IR', Out: 'Out', Doubtful: 'Doubtful', Questionable: 'Questionable', Suspension: 'Suspended' };
+let moved = 0, dropped = 0, injured = 0, depthRanked = 0;
+const byAbbr = new Map(teams.map((t) => [t.abbr, t]));
+for (const t of teams) {
+  t.roster = t.roster.filter((p) => {
+    const cands = espnByName.get(norm(`${p.first}${p.last}`)) || [];
+    const e = cands.length === 1 ? cands[0] : cands.find((c) => c.team === t.abbr);
+    if (!e) { dropped++; return false; } // not on any NFL roster right now (released / unsigned)
+    p.espnId = e.id;
+    if (e.jersey != null) p.num = e.jersey;
+    let status = STATUS[e.injury] || null;
+    if (e.group === 'injuredReserveOrOut' && !status) status = 'IR';
+    if (e.group === 'suspended') status = 'Suspended';
+    if (status) { p.injury = { status, asOf: TODAY }; injured++; }
+    if (e.group === 'practiceSquad') p.ps = true;
+    const d = e.depth || {};
+    if (d[p.pos] != null) { p.depth = d[p.pos]; depthRanked++; }
+    if (d.KR != null || d.PR != null) p.st = { ...(d.KR != null ? { KR: d.KR } : {}), ...(d.PR != null ? { PR: d.PR } : {}) };
+    if (e.team !== t.abbr && byAbbr.has(e.team)) { (p._move = e.team); moved++; }
+    return true;
+  });
+}
+for (const t of teams) for (const p of t.roster.filter((x) => x._move)) {
+  t.roster = t.roster.filter((x) => x !== p);
+  const to = byAbbr.get(p._move); delete p._move; to.roster.push(p);
+}
+console.log(`ESPN rosters: ${moved} players moved to their current team, ${dropped} not on an NFL roster dropped, ${injured} with an injury/status designation, ${depthRanked} ranked on a depth chart`);
+const schedule = await fetchSchedule();
+
 calibrate(teams);
 teams.sort((a, b) => (a.div || '').localeCompare(b.div || '') || a.abbr.localeCompare(b.abbr));
 
 const league = {
   version: 1, seed: 0, source: 'nfl',
   label: `NFL: ${maddenLabel.replace('madden-nfl-', 'Madden ')}, ${STATS_SEASON} ESPN stats`,
-  built: new Date().toISOString().slice(0, 10),
+  built: TODAY,
+  schedule: schedule.length ? { season: COACH_SEASON, weeks: schedule } : null,
   teams,
 };
 const file = path.join(OUT_DIR, 'nfl-league.json');
 fs.writeFileSync(file, JSON.stringify(league));
 const counts = {};
 for (const t of teams) for (const p of t.roster) counts[p.pos] = (counts[p.pos] || 0) + 1;
+total = teams.reduce((n, t) => n + t.roster.length, 0);
+matched = teams.reduce((n, t) => n + t.roster.filter((p) => p.real).length, 0);
 console.log(`${teams.length} teams, ${total} players (${matched} matched to ${STATS_SEASON} stats) → ${path.relative(ROOT, file)} (${(fs.statSync(file).size / 1e6).toFixed(1)} MB)`);
 console.log('By position:', Object.entries(counts).map(([k, v]) => `${k} ${v}`).join(', '));
 console.log(league.label);
+if (schedule.length) console.log(`Schedule: ${schedule.length} weeks, ${schedule.flatMap((w) => w.games).filter((g) => g.final).length} games already final`);

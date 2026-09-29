@@ -94,7 +94,7 @@ export class TeamEditor {
             ${roster.map((p) => `<tr data-pid="${p.id}">
               <td><input data-p="num" value="${p.num}" type="number" min="0" max="99" /></td>
               <td><input class="nm" data-p="first" value="${esc(p.first)}" /></td>
-              <td><input class="nm" data-p="last" value="${esc(p.last)}" /></td>
+              <td><input class="nm" data-p="last" value="${esc(p.last)}" />${p.injury ? ` <span class="inj-tag" title="As of ${esc(p.injury.asOf || '')}">${esc(p.injury.status)}</span>` : ''}</td>
               <td><select data-p="pos">${POSITIONS.map((x) => `<option ${x === p.pos ? 'selected' : ''}>${x}</option>`).join('')}</select></td>
               <td><input data-p="height" value="${p.height}" type="number" min="64" max="84" title="inches" /></td>
               <td><input data-p="weight" value="${p.weight}" type="number" min="150" max="380" /></td>

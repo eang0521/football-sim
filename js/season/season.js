@@ -80,25 +80,54 @@ function buildNflSchedule(divs, year, rng) {
   return weeks.map((games, w) => ({ week: w + 1, games: games.map((g) => ({ ...g, result: null })) }));
 }
 
-export function createSeason(league, prev) {
+// Real schedule from an imported league (optionally with the results already played).
+function realWeeks(league, withResults) {
+  const ids = new Set(league.teams.map((t) => t.id));
+  return league.schedule.weeks.map((w) => ({
+    week: w.week,
+    games: w.games.filter((g) => ids.has(g.home) && ids.has(g.away)).map((g) => ({
+      home: g.home, away: g.away, date: g.date,
+      result: withResults && g.final ? { homeScore: g.homeScore, awayScore: g.awayScore, ot: !!g.ot, real: true } : null,
+    })),
+  }));
+}
+
+// Current injury designations from an imported league -> weeks out at the start of the season.
+function realInjuries(league) {
+  const out = {};
+  const W = { IR: 4, Out: 1, Doubtful: 1, Suspended: 2 };
+  for (const t of league.teams) for (const p of t.roster) {
+    const w = W[p.injury?.status];
+    if (w) out[p.id] = { weeks: w, part: p.injury.status === 'Suspended' ? 'suspension' : 'injury (real)', team: t.id, name: `${p.first} ${p.last}`, pos: p.pos, ir: p.injury.status === 'IR' };
+  }
+  return out;
+}
+
+// opts (imported leagues with a schedule): { realSchedule, realResults, realInjuries }
+export function createSeason(league, prev, opts = {}) {
   const rng = new RNG(Date.now() % 1e9);
   const ids = league.teams.map((t) => t.id);
   const divs = nflDivisions(league);
   const year = prev ? prev.year + 1 : 1;
+  const real = !prev && opts.realSchedule && league.schedule?.weeks?.length >= 17;
+  const weeks = real ? realWeeks(league, opts.realResults) : divs ? buildNflSchedule(divs, year, rng) : buildSchedule(ids, rng);
+  let week = 0;
+  while (week < weeks.length && weeks[week].games.every((g) => g.result)) week++;
   return {
+    realSeason: real ? league.schedule.season : null,
     version: SEASON_VERSION,
     format: divs ? 'nfl' : 'bracket',
     divisions: divs,
     year,
     seed: rng.seed,
     teams: ids,
-    weeks: divs ? buildNflSchedule(divs, year, rng) : buildSchedule(ids, rng),
-    week: 0,               // index of the current regular-season week
+    weeks,
+    week,                  // index of the current regular-season week
     phase: 'regular',      // 'regular' | 'playoffs' | 'done'
     playoffs: null,        // { rounds: [[game...], [game]] }
     champion: null,
     stats: {},             // pid -> season line
-    injuries: {},          // pid -> { weeks, part, team }
+    injuries: !prev && opts.realInjuries ? realInjuries(league) : {}, // pid -> { weeks, part, team, ir }
     history: prev ? prev.history : [],
     careers: prev ? prev.careers : {},
   };
@@ -168,29 +197,38 @@ export function createSeasonGame(season, league, g, opts = {}) {
 export function recordGame(season, league, g, game) {
   const s = game.s;
   g.result = { homeScore: s.score.home, awayScore: s.score.away, ot: s.quarter >= 5 };
-  // season + career stats
+  // season + career stats (full box-score lines), per-player game logs and team totals
+  season.logs ||= {};
+  season.teamStats ||= {};
+  const wk = g.playoff || `W${season.weeks[season.week]?.week ?? season.week + 1}`;
   for (const [pid, L] of game.stats.players) {
     const info = game.stats.pidTeam.get(pid);
     if (!info) continue;
+    const tm = game.teams[info.key].id;
     for (const bucket of [season.stats, season.careers]) {
-      const cur = (bucket[pid] ||= { name: `${info.p.first} ${info.p.last}`, pos: info.p.pos, team: game.teams[info.key].id, gp: 0,
-        pass: { att: 0, cmp: 0, yds: 0, td: 0, int: 0 }, rush: { car: 0, yds: 0, td: 0 }, rec: { rec: 0, yds: 0, td: 0 },
-        def: { tkl: 0, sack: 0, int: 0 }, kick: { fgm: 0, fga: 0 } });
-      cur.team = game.teams[info.key].id;
+      const cur = (bucket[pid] ||= { name: `${info.p.first} ${info.p.last}`, pos: info.p.pos, team: tm, gp: 0 });
+      cur.team = tm; cur.pos = info.p.pos;
       cur.gp++;
-      for (const k of ['att', 'cmp', 'yds', 'td', 'int']) cur.pass[k] += L.pass[k] || 0;
-      for (const k of ['car', 'yds', 'td']) cur.rush[k] += L.rush[k] || 0;
-      for (const k of ['rec', 'yds', 'td']) cur.rec[k] += L.rec[k] || 0;
-      cur.def.tkl += (L.def.tkl || 0) + (L.def.ast || 0); cur.def.sack += L.def.sack || 0; cur.def.int += L.def.int || 0;
-      cur.kick.fgm += L.kick.fgm || 0; cur.kick.fga += L.kick.fga || 0;
+      addLine(cur, L);
     }
+    const opp = game.teams[info.key === 'home' ? 'away' : 'home'].id;
+    const my = s.score[info.key], their = s.score[info.key === 'home' ? 'away' : 'home'];
+    (season.logs[pid] ||= []).push({ w: wk, opp, ha: info.key === 'home' ? 'vs' : '@', res: `${my > their ? 'W' : my < their ? 'L' : 'T'} ${my}-${their}`, L: compactLine(L) });
+  }
+  for (const key of ['home', 'away']) {
+    const other = key === 'home' ? 'away' : 'home';
+    const T = (season.teamStats[game.teams[key].id] ||= { g: 0, pf: 0, pa: 0, off: {}, def: {} });
+    T.g++; T.pf += s.score[key]; T.pa += s.score[other];
+    addLine(T.off, game.stats.team[key]);
+    addLine(T.def, game.stats.team[other]);
   }
   // injuries carry over: weeks out based on severity
   const rng = new RNG((season.seed + season.week * 97 + s.score.home * 7 + s.score.away) >>> 0);
   for (const [pid, inj] of game.injuries) {
     if (inj.returnAt !== Infinity && inj.returned) continue;
-    const weeks = inj.part === 'concussion' ? rng.int(1, 2) : inj.returnAt === Infinity ? rng.int(1, 5) : rng.int(0, 1);
-    if (weeks > 0) season.injuries[pid] = { weeks: weeks + 1, part: inj.part, team: game.teams[inj.team].id, name: `${inj.p.first} ${inj.p.last}` };
+    const weeks = inj.weeks ?? (inj.part === 'concussion' ? rng.int(1, 2) : inj.returnAt === Infinity ? rng.int(1, 5) : rng.int(0, 1));
+    if (weeks > 0) season.injuries[pid] = { weeks: weeks >= 99 ? 99 : weeks + 1, part: inj.part, team: game.teams[inj.team].id,
+      name: `${inj.p.first} ${inj.p.last}`, pos: inj.p.pos, ir: weeks >= 4, seasonEnding: weeks >= 99, week: season.week + 1 };
   }
   advance(season, league);
 }
@@ -275,17 +313,36 @@ export function seedOf(season, id) {
   return null;
 }
 
+// Sum a box-score line into a running total ('long' keeps the max).
+function addLine(cur, L) {
+  for (const k in L) {
+    const v = L[k];
+    if (v && typeof v === 'object') addLine(cur[k] ||= {}, v);
+    else if (typeof v === 'number') cur[k] = k === 'long' ? Math.max(cur[k] || 0, v) : (cur[k] || 0) + v;
+  }
+}
+// Only the categories a player actually recorded (keeps game logs small).
+function compactLine(L) {
+  const out = {};
+  for (const g in L) {
+    const o = {};
+    for (const k in L[g]) if (L[g][k]) o[k] = Math.round(L[g][k] * 10) / 10;
+    if (Object.keys(o).length) out[g] = o;
+  }
+  return out;
+}
+
 // ---------- leaders ----------
 const CATS = {
-  passYds: { label: 'Passing yards', get: (x) => x.pass.yds },
-  passTD: { label: 'Passing TD', get: (x) => x.pass.td },
-  rushYds: { label: 'Rushing yards', get: (x) => x.rush.yds },
-  rushTD: { label: 'Rushing TD', get: (x) => x.rush.td },
-  recYds: { label: 'Receiving yards', get: (x) => x.rec.yds },
-  rec: { label: 'Receptions', get: (x) => x.rec.rec },
-  sacks: { label: 'Sacks', get: (x) => Math.round(x.def.sack * 10) / 10 },
-  ints: { label: 'Interceptions', get: (x) => x.def.int },
-  tackles: { label: 'Tackles', get: (x) => x.def.tkl },
+  passYds: { label: 'Passing yards', get: (x) => x.pass?.yds || 0 },
+  passTD: { label: 'Passing TD', get: (x) => x.pass?.td || 0 },
+  rushYds: { label: 'Rushing yards', get: (x) => x.rush?.yds || 0 },
+  rushTD: { label: 'Rushing TD', get: (x) => x.rush?.td || 0 },
+  recYds: { label: 'Receiving yards', get: (x) => x.rec?.yds || 0 },
+  rec: { label: 'Receptions', get: (x) => x.rec?.rec || 0 },
+  sacks: { label: 'Sacks', get: (x) => Math.round((x.def?.sack || 0) * 10) / 10 },
+  ints: { label: 'Interceptions', get: (x) => x.def?.int || 0 },
+  tackles: { label: 'Tackles', get: (x) => (x.def?.tkl || 0) + (x.def?.ast || 0) },
 };
 export const LEADER_CATS = CATS;
 

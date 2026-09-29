@@ -25,6 +25,51 @@ export function setupSpecial(sim, cfg) {
 
 function takeMany(pk, list) { return list.map((pos) => pk.take(pos)); }
 
+// Special-teams units come off the bench first; starters at these spots are usually spared.
+const STARTERS = { QB: 1, RB: 1, FB: 0, WR: 3, TE: 1, OL: 5, DE: 2, DT: 2, LB: 2, CB: 2, S: 2 };
+function takeBench(pk, pos, score) {
+  const all = pk.d[pos] || [];
+  let bench = all.filter((p, i) => i >= (STARTERS[pos] ?? 0) && !pk.used.has(p.id));
+  if (score) bench = bench.sort((a, b) => score(b) - score(a));
+  if (!bench.length) return pk.take(pos);
+  pk.used.add(bench[0].id);
+  return bench[0];
+}
+function benchMany(pk, list, score) { return list.map((pos) => takeBench(pk, pos, score)); }
+
+// Returners: an imported special-teams depth chart wins; otherwise the most dangerous
+// ball carrier who isn't a key starter (teams rarely risk their WR1 or RB1 on returns).
+export function pickReturner(pk, kind) {
+  const pool = [...(pk.d.RB || []), ...(pk.d.WR || []), ...(pk.d.CB || []), ...(pk.d.S || [])].filter((p) => !pk.used.has(p.id));
+  const listed = pool.filter((p) => p.st?.[kind] != null).sort((a, b) => a.st[kind] - b.st[kind]);
+  let best = listed[0];
+  if (!best) {
+    const score = (p) => {
+      const r = p.ratings;
+      const idx = (pk.d[p.pos] || []).indexOf(p);
+      const starter = idx >= 0 && idx < (STARTERS[p.pos] ?? 0);
+      return r.spd + r.acc * 0.5 + r.agi * 0.5 + r.btk * 0.6 + (kind === 'PR' ? r.cth * 0.6 : r.car * 0.3) - (starter ? (idx === 0 ? 28 : 14) : 0);
+    };
+    best = pool.sort((a, b) => score(b) - score(a))[0];
+  }
+  if (best) pk.used.add(best.id);
+  return best || pk.take('WR');
+}
+const gunnerScore = (p) => p.ratings.spd * 1.2 + p.ratings.tak * 0.6 + p.ratings.agi * 0.3;
+
+// Block chance for a kick: the rush unit's push against the protection, raised for low, long kicks.
+function blockChance(sim, base) {
+  const avg = (arr, f) => arr.reduce((s, a) => s + f(a), 0) / Math.max(1, arr.length);
+  const rush = sim.def.filter((d) => d.x < sim.los + 2.5);
+  const prot = sim.off.filter((o) => Math.abs(o.x - sim.los) < 2.5);
+  const edge = avg(rush, (d) => d.r.str * 0.4 + d.r.prs * 0.3 + d.r.spd * 0.3) - avg(prot, (o) => o.r.str * 0.5 + o.r.pbk * 0.5);
+  return base * Math.exp(edge / 14);
+}
+function blocker(sim) {
+  const k = sim.st.holder || sim.st.kicker;
+  return sim.def.filter((d) => !d.down).sort((a, b) => Math.hypot(a.x - k.x, a.y - k.y) - Math.hypot(b.x - k.x, b.y - k.y))[0];
+}
+
 // ---------------- Kickoff ----------------
 function setupKickoff(sim, cfg) {
   const { offTeam: kt, defTeam: rt, los } = cfg;
@@ -32,7 +77,7 @@ function setupKickoff(sim, cfg) {
   // Skip the top starters where sensible: take depth players for coverage
   const K = kp.take('K');
   kp.used.add(kp.d.QB[0]?.id);
-  const cov = takeMany(kp, ['LB', 'LB', 'S', 'S', 'CB', 'CB', 'LB', 'WR', 'RB', 'TE']);
+  const cov = benchMany(kp, ['LB', 'LB', 'S', 'S', 'CB', 'CB', 'LB', 'WR', 'RB', 'TE'], gunnerScore);
   const off = [];
   const k = makeAgent(K, 'O', 'K', los - 6, MID_Y);
   k.special = kickerKO; off.push(k);
@@ -43,10 +88,9 @@ function setupKickoff(sim, cfg) {
   cov.forEach((p, i) => { const a = makeAgent(p, 'O', 'COV' + i, onside ? los - 1 : los + 25, ys[i]); a.special = coverage; a.d.laneY = ys[i]; off.push(a); });
   // Return team
   const d = rp.d;
-  const ret1 = [...d.RB, ...d.WR, ...d.CB].filter((p) => !rp.used.has(p.id)).sort((a, b) => (b.ratings.spd + b.ratings.btk) - (a.ratings.spd + a.ratings.btk))[0];
-  rp.used.add(ret1.id);
-  const ret2 = rp.take('RB');
-  const blk = takeMany(rp, ['LB', 'LB', 'TE', 'FB', 'LB', 'S', 'TE', 'DE', 'S']);
+  const ret1 = pickReturner(rp, 'KR');
+  const ret2 = pickReturner(rp, 'KR');
+  const blk = benchMany(rp, ['LB', 'LB', 'TE', 'FB', 'LB', 'S', 'TE', 'DE', 'S']);
   const def = [];
   // onside: the "hands team" crowds up to 10-15 yards from the kick
   const r1 = makeAgent(ret1, 'D', 'KR', onside ? los + 28 : los + 62, MID_Y + 4); r1.special = returner; def.push(r1);
@@ -333,9 +377,9 @@ function setupPunt(sim, cfg) {
   const kp = new Picker(kt, cfg.unavailable), rp = new Picker(rt, cfg.unavailable);
   const P = kp.take('P');
   const line = takeMany(kp, ['OL', 'OL', 'OL', 'OL', 'OL']);
-  const wings = takeMany(kp, ['TE', 'TE']);
-  const pp = kp.take('FB');
-  const gun = takeMany(kp, ['CB', 'WR']);
+  const wings = benchMany(kp, ['TE', 'LB']);
+  const pp = takeBench(kp, 'FB');
+  const gun = benchMany(kp, ['CB', 'WR'], gunnerScore);
   const off = [];
   const lineY = [0, 1.3, -1.3, 2.6, -2.6];
   line.forEach((p, i) => {
@@ -348,11 +392,10 @@ function setupPunt(sim, cfg) {
   const pA = makeAgent(P, 'O', 'P', los - 14, ballY); pA.special = punter; off.push(pA);
   // return team
   const d = rp.d;
-  const ret1 = [...d.WR, ...d.CB, ...d.RB].filter((p) => !rp.used.has(p.id)).sort((a, b) => (b.ratings.spd + b.ratings.btk + b.ratings.cth) - (a.ratings.spd + a.ratings.btk + a.ratings.cth))[0];
-  rp.used.add(ret1.id);
-  const rush = takeMany(rp, ['DE', 'DT', 'LB', 'LB', 'DE', 'LB']);
-  const jam = takeMany(rp, ['CB', 'CB']);
-  const back = takeMany(rp, ['S', 'S']);
+  const ret1 = pickReturner(rp, 'PR');
+  const rush = benchMany(rp, ['DE', 'DT', 'LB', 'LB', 'DE', 'LB']);
+  const jam = benchMany(rp, ['CB', 'CB'], gunnerScore);
+  const back = benchMany(rp, ['S', 'S']);
   const def = [];
   const rY = [3.2, 1.3, -0.7, -2.2, -3.8, 5.5];
   rush.forEach((p, i) => { const a = makeAgent(p, 'D', 'PR' + i, los + 0.9, ballY + rY[i]); a.special = puntRush; def.push(a); });
@@ -392,6 +435,13 @@ function punter(sim, a) {
     if (!a.d.caughtT) a.d.caughtT = sim.t;
     if (sim.t - a.d.caughtT > 1.15) {
       sim.st.punted = true;
+      if (sim.rng.chance(blockChance(sim, 0.004))) {
+        // BLOCKED: the ball caroms back behind the line
+        sim.st.blocked = blocker(sim);
+        launch(sim, a, { x: a.x - sim.rng.range(2, 9), y: a.y + sim.rng.normal(0, 4) }, 0.9, 'punt', { letBounce: true, zEnd: 0.3, blocked: true });
+        a.anim = 'kick'; a.animT = 0;
+        return;
+      }
       const r = a.r;
       // gross distance measured from the line of scrimmage
       const W = sim.cfg.weather;
@@ -500,6 +550,21 @@ function puntResult(outcome, spotX) {
     res.possession = 'D'; res.turnover = true;
     res.desc = `Punt is blocked/botched! ${nm(P)} is swarmed.`;
     res.spotX = Math.min(spotX, sim.los);
+    return res;
+  }
+  if (st.blocked) {
+    // the rush team scoops it up; now and then it goes the other way for six
+    const B = st.blocked;
+    res.events.push({ type: 'punt', pid: P.p.id, punts: 1, yds: 0 }, { type: 'def', pid: B.p.id, blk: 1 });
+    const land = sim.st.land?.x ?? sim.los - 5;
+    if (sim.rng.chance(land < 12 ? 0.45 : 0.14)) {
+      res.td = 'D'; res.spotX = 0;
+      res.desc = `${nm(P)}'s punt is BLOCKED by ${nm(B)}! The punt team can't cover it... TOUCHDOWN return!`;
+    } else {
+      res.spotX = clamp(land, 1, sim.los);
+      if (res.spotX <= 0.5) { res.safety = true; res.possession = 'O'; }
+      res.desc = `${nm(P)}'s punt is BLOCKED by ${nm(B)}! Recovered at the ${fieldSpot(res.spotX)}.`;
+    }
     return res;
   }
   let gross = Math.round((outcome === 'touchback' ? 100 : (st.catchX ?? spotX)) - sim.los);
@@ -638,6 +703,14 @@ function fgKicker(sim, a) {
       sim.st.kicked = true;
       const W = sim.cfg.weather;
       const p = Math.max(0, fgProbability(a.p, effectiveKickDist(W, sim.st.fgDist, sim.cfg.dir)) - (W?.fgPen ?? 0));
+      const xp = sim.kind === 'xp';
+      if (sim.rng.chance(blockChance(sim, xp ? 0.006 : 0.009 + Math.max(0, sim.st.fgDist - 35) * 0.0007))) {
+        sim.st.blocked = blocker(sim);
+        launch(sim, h, { x: h.x - sim.rng.range(-2, 8), y: h.y + sim.rng.normal(0, 5) }, 0.9, xp ? 'xp' : 'fg', { good: false, zEnd: 0.2, blocked: true });
+        sim.ball.x = h.x; sim.ball.z = 0.35;
+        a.anim = 'kick'; a.animT = 0;
+        return;
+      }
       const good = sim.rng.chance(p);
       const kx = h.x;
       const T = (110 - kx) / 22;
@@ -692,6 +765,16 @@ function fgResult(outcome, spotX) {
   };
   const nm = shortName(K.p);
   if (st.fake && !xp) return fakePassResult(sim, res, outcome, spotX, st.holder, 'FAKE FIELD GOAL!');
+  if (st.blocked) {
+    const B = st.blocked;
+    res.good = false; res.blocked = true;
+    res.events.push({ type: 'kick', pid: K.p.id, ...(xp ? { xpa: 1, xpm: 0 } : { fga: 1, fgm: 0 }) }, { type: 'def', pid: B.p.id, blk: 1 });
+    const land = sim.st.land?.x ?? sim.los - 5;
+    res.recoverX = clamp(land, 1, sim.los);
+    if (!xp && sim.rng.chance(0.12)) res.returnTD = true;
+    res.desc = `${nm}'s ${xp ? 'extra point' : `${st.fgDist}-yard field goal`} is BLOCKED by ${shortName(B.p)}!${res.returnTD ? ' Scooped up and returned for a TOUCHDOWN!' : ''}`;
+    return res;
+  }
   if (xp) {
     res.events.push({ type: 'kick', pid: K.p.id, xpa: 1, xpm: good ? 1 : 0 });
     res.desc = good ? `${nm} extra point is GOOD.` : `${nm} extra point is NO GOOD${st.wide ? ` (wide ${st.wide})` : ''}.`;
@@ -701,3 +784,5 @@ function fgResult(outcome, spotX) {
   }
   return res;
 }
+
+function fieldSpot(x) { const b = Math.round(x); return b <= 50 ? `own ${b}` : `opp ${100 - b}`; }

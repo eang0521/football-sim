@@ -44,7 +44,9 @@ The site will be served at `https://<user>.github.io/<repo>/`. All paths are rel
 | Names | Floating jersey numbers and names |
 | Auto-advance | Off = pause after every play |
 | **Teams** | Edit teams, colors, coach tendencies, and every player's ratings and traits (saved in your browser) |
-| **Season** | Start a season, then watch or simulate each week's games; view standings, leaders, injuries and history |
+| **Season** | Start a season, then watch or simulate each week's games (simulated in parallel Web Workers). View standings, leaders, stats, team stats, player pages with game logs, injuries (with IR) and history |
+| **Replay** / **R** | Replay the last play |
+| **Highlights** | Watch the game's biggest plays, ranked by win-probability swing |
 
 ## How it works
 
@@ -93,7 +95,11 @@ tools/               Node harnesses for tuning realism
 - **Playbook depth.** RB and WR screens (linemen sell pass protection, then release), pre-snap motion (a man defender trails the motion man, which tells the QB man vs. zone), zone read and RPOs (the QB reads a key defender at the mesh), audibles when the box outnumbers the blockers, hot routes against 6+ rushers, and disguised coverages and simulated pressure that muddy the QB's pre-snap read.
 - **Players.** Fatigue drains with effort and recovers on the sideline, so linemen, backs and defensive backs rotate. Traits change behavior, not just ratings: Scrambler, Gunslinger, Game Manager, Possession Receiver, Ball Hawk, Workhorse and more, all editable in the team editor. Team momentum swings on big plays and turnovers, and late in close games clutch players rise while shaky ones tighten up.
 - **Game day.** Weather (rain, snow, wind, cold) affects catching, ball security, throwing, footing and kicking, and is rendered in the stadium. Coaches learn in-game what's working and make halftime adjustments; defenses adapt to an offense's tendencies. Officials sometimes miss close calls (sideline catches, spots, goal-line plunges, fumbles), leading to booth reviews and coach's challenges. Special-teams situations include onside kicks, squib kicks, and fake punts and field goals.
+- **Stats pages.** Sortable league-wide tables (passing, rushing, receiving, defense, kicking, punting, returns) and team offense/defense tables. Player pages show game logs and, for imported leagues, the player's real stat line from last season.
 - **Season mode.** An 8-team, 14-week season with standings, tiebreakers and a 4-team playoff. You can watch or simulate any game. Injuries carry over week to week, players develop in the offseason, and the league tracks season and career leaders and a champions history.
+- **Personnel and self-scouting.** Offenses choose personnel (10/11/12/21/22) by situation, then a formation, then a play that fits. Each side tracks what the offense runs from each formation during the game: the offense breaks its own tendencies, and the defense loads the box or plays two-high based on what it has seen.
+- **Win probability.** A possession-based model drives 4th-down and 2-point decisions, with coach aggression setting how big an edge is needed to go for it. It also powers the scorebug's win-probability readout and the highlight rankings.
+- **Special teams.** Returners and coverage units come from the bench, and FGs, PATs and punts can be blocked (and occasionally returned for a TD). The Hail Mary is modeled at the end of a half.
 - **Game management.** Clock rules include runoff by tempo and out of bounds late in halves, the two-minute warning, timeouts, hurry-up, spiking the ball, the 10-second runoff, victory formation, intentional safeties, and kneel-downs. Also modeled: 4th-down and field goal decisions from kicker range and coach aggression, a 2-point chart, and the 2025 overtime rules.
 
 ### Realism checks
@@ -123,7 +129,9 @@ node tools/import-nfl.mjs
 - **Rosters and ratings** come from the current Madden NFL ratings on ea.com (positions, jersey numbers, height and weight, and the full rating set). Madden ratings are mapped onto the sim's rating keys and then calibrated per position to the scale the sim was tuned on, so real rosters produce NFL-like box scores. The depth chart keeps Madden's order, and traits are derived from the underlying ratings (for example, a QB with elite speed becomes a Scrambler).
 - **Last season's stats** (passing, rushing, receiving, defense, kicking, punting) come from ESPN, and appear in a stats column in the team editor.
 - **Coaches** are the current head coaches. Their pass rate, 4th-down aggression, deep-shot rate and tempo come from last season's team stats.
-- **Season mode** switches to the NFL format for this league: 17 games with each division rival twice, 7 playoff teams per conference with a bye for each 1 seed, and a championship game. The NFL league and the fictional league each keep their own saved season.
+- **Current rosters, injuries and depth charts** come from ESPN. Players go to their current team, anyone not on a roster is dropped, injury, IR and suspension designations are kept, and ESPN's depth charts (including kick and punt returners) set who starts.
+- **Season mode** switches to the NFL format for this league: 17 games with each division rival twice, 7 playoff teams per conference with a bye for each 1 seed, and a championship game. It can use the **real schedule** (with byes), start at the current week with the **real results so far**, and carry over current injuries. The NFL league and the fictional league each keep their own saved season.
+- Live data (ratings, rosters, injuries, depth charts, schedule) is cached per day, so running the importer again on a later day refreshes it.
 
 The output goes to `private/nfl-league.json`, which is gitignored, so it is never committed or deployed to GitHub Pages. When the site runs locally, **Teams → Load NFL league** loads it; anywhere else, use **Import league JSON**. Downloads are cached in `private/cache/`; pass `--refresh` to fetch fresh ratings, and `--stats-season YYYY` to choose the stats season. Check the league against NFL norms with `node tools/headless.mjs 24 --league private/nfl-league.json`.
 

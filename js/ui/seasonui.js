@@ -1,9 +1,11 @@
 // Season screen: standings, weekly slate (watch or sim), leaders, injuries, history.
 import {
   createSeason, currentGames, createSeasonGame, recordGame, standings, leaders, developPlayers,
-  LEADER_CATS, saveSeason, loadSeason, clearSeason, seasonKey, playoffTeams, seedOf,
+  LEADER_CATS, saveSeason, loadSeason, clearSeason, seasonKey, playoffTeams, seedOf, outPlayers,
 } from '../season/season.js';
 import { saveLeague } from '../data/storage.js';
+import { StatsView, realAsLine } from './statsui.js';
+import { SimPool } from './simpool.js';
 
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
@@ -17,7 +19,13 @@ export class SeasonUI {
     this.leaderSrc = 'season';
     this.busy = false;
     this.devNotes = null;
+    this.stats = new StatsView(this);
+    this.playerId = null;
+    this.compareReal = false;
   }
+
+  openPlayer(pid) { this.playerId = pid; this.render(); this.root.scrollTop = 0; }
+  closePlayer() { this.playerId = null; this.render(); }
 
   team(id) { return this.deps.getLeague().teams.find((t) => t.id === id); }
   chip(id) {
@@ -36,25 +44,42 @@ export class SeasonUI {
     const S = this.season;
     if (!S) {
       const nfl = lg.teams.length === 32 && lg.teams.every((t) => t.div);
+      const sch = lg.schedule;
+      const finals = sch ? sch.weeks.flatMap((w) => w.games).filter((g) => g.final).length : 0;
+      const firstOpen = sch ? (sch.weeks.find((w) => w.games.some((g) => !g.final))?.week ?? sch.weeks.length) : 1;
+      const realOpts = sch ? `<div class="se-opts">
+          <label class="tog"><input type="checkbox" id="se-real" checked /> Use the real ${sch.season} schedule (with byes)</label>
+          <label class="tog"><input type="checkbox" id="se-results" ${finals ? 'checked' : 'disabled'} /> Start at week ${firstOpen} with the ${finals} real results so far</label>
+          <label class="tog"><input type="checkbox" id="se-inj" checked /> Carry over current injuries, IR and suspensions</label>
+        </div>` : '';
       this.root.innerHTML = `<p style="color:var(--muted)">${nfl
         ? 'Play an NFL season: a 17-game schedule with two games against each division rival, a 14-team playoff (division winners seeded 1–4, three wild cards, byes for the 1 seeds) and a championship game.'
         : `Play a ${lg.teams.length}-team season: a ${lg.teams.length <= 10 ? `${2 * (lg.teams.length - (lg.teams.length % 2 ? 0 : 1))}-week double round-robin` : '17-week schedule'}, a ${lg.teams.length > 8 ? 8 : 4}-team playoff and a champion.`}
-        Injuries carry over from week to week, players develop between seasons, and season and career leaders are tracked.${nfl ? ' A full NFL season takes several minutes to simulate.' : ''}</p>
+        Injuries carry over from week to week, players develop between seasons, and season and career leaders are tracked.${nfl ? ' A full NFL season takes a few minutes to simulate.' : ''}</p>
+        ${realOpts}
         <div class="actions" style="justify-content:flex-start"><button class="primary" id="se-new">Start season</button></div>`;
-      this.root.querySelector('#se-new').onclick = () => { this.season = createSeason(lg); this.save(); this.render(); };
+      this.root.querySelector('#se-new').onclick = () => {
+        const q = (id) => this.root.querySelector(id)?.checked;
+        const real = q('#se-real');
+        this.season = createSeason(lg, null, { realSchedule: real, realResults: real && q('#se-results'), realInjuries: q('#se-inj') });
+        this.save(); this.render();
+      };
       return;
     }
-    const tabs = [['overview', 'Standings & schedule'], ['leaders', 'Leaders'], ['injuries', 'Injuries'], ['history', 'History']];
+    const tabs = [['overview', 'Standings & schedule'], ['leaders', 'Leaders'], ['stats', 'Stats'], ['teamstats', 'Team stats'], ['injuries', 'Injuries'], ['history', 'History']];
     this.root.innerHTML = `
       <div class="se-head">
-        <div class="se-title">Season ${S.year} · ${S.phase === 'regular' ? `Week ${Math.min(S.week + 1, S.weeks.length)} of ${S.weeks.length}` : S.phase === 'playoffs' ? 'Playoffs' : 'Complete'}</div>
+        <div class="se-title">${S.realSeason && S.year === 1 ? `${S.realSeason} NFL season` : `Season ${S.year}`} · ${S.phase === 'regular' ? `Week ${Math.min(S.week + 1, S.weeks.length)} of ${S.weeks.length}` : S.phase === 'playoffs' ? 'Playoffs' : 'Complete'}</div>
         <div class="pos-filter">${tabs.map(([k, l]) => `<button data-tab="${k}" class="${this.tab === k ? 'on' : ''}">${l}</button>`).join('')}</div>
       </div>
       <div id="se-status" class="se-status">${this.busy ? esc(this.busy) : ''}</div>
       <div id="se-body"></div>`;
-    this.root.querySelectorAll('[data-tab]').forEach((b) => { b.onclick = () => { this.tab = b.dataset.tab; this.render(); }; });
+    this.root.querySelectorAll('[data-tab]').forEach((b) => { b.onclick = () => { this.tab = b.dataset.tab; this.playerId = null; this.render(); }; });
     const body = this.root.querySelector('#se-body');
-    if (this.tab === 'overview') this.renderOverview(body);
+    if (this.playerId) this.stats.renderPlayer(body, this.playerId);
+    else if (this.tab === 'stats') this.stats.renderPlayers(body);
+    else if (this.tab === 'teamstats') this.stats.renderTeams(body);
+    else if (this.tab === 'overview') this.renderOverview(body);
     else if (this.tab === 'leaders') this.renderLeaders(body);
     else if (this.tab === 'injuries') this.renderInjuries(body);
     else this.renderHistory(body);
@@ -71,11 +96,11 @@ export class SeasonUI {
     if (S.format === 'nfl') {
       table = [...new Set(S.divisions.map((d) => d.conf))].map((c) => `<h3 class="se-h3">${esc(c)}</h3>${S.divisions.filter((d) => d.conf === c).map((d) =>
         `<table class="stats" style="margin-bottom:6px"><tr><th>${esc(d.name)}</th><th>W</th><th>L</th><th>T</th><th>PCT</th><th>DIV</th><th>PF</th><th>PA</th><th>STRK</th></tr>
-        ${rows.filter((r) => r.div === d.name).map((r) => `<tr><td>${this.chip(r.id)} ${esc(r.team.name)}${seed(r.id)}</td><td>${r.w}</td><td>${r.l}</td><td>${r.t}</td><td>${pct(r)}</td><td>${r.dw}-${r.dl}${r.dt ? `-${r.dt}` : ''}</td><td>${r.pf}</td><td>${r.pa}</td><td>${r.streak}</td></tr>`).join('')}</table>`).join('')}`).join('')
+        ${rows.filter((r) => r.div === d.name).map((r) => `<tr><td>${this.chip(r.id)} <span class="tname">${esc(r.team.name)}</span>${seed(r.id)}</td><td>${r.w}</td><td>${r.l}</td><td>${r.t}</td><td>${pct(r)}</td><td>${r.dw}-${r.dl}${r.dt ? `-${r.dt}` : ''}</td><td>${r.pf}</td><td>${r.pa}</td><td>${r.streak}</td></tr>`).join('')}</table>`).join('')}`).join('')
         + '<div style="color:var(--muted);font-size:11.5px;margin-top:4px">Seven teams per conference make the playoffs: four division winners and three wild cards.</div>';
     } else {
       table = `<table class="stats"><tr><th>Team</th><th>W</th><th>L</th><th>T</th><th>PCT</th><th>PF</th><th>PA</th><th>DIFF</th><th>STRK</th></tr>
-      ${rows.map((r, i) => `<tr${i === seedCut - 1 ? ' class="cut"' : ''}><td>${i + 1}. ${this.chip(r.id)} ${esc(r.team.name)}</td><td>${r.w}</td><td>${r.l}</td><td>${r.t}</td><td>${pct(r)}</td><td>${r.pf}</td><td>${r.pa}</td><td>${r.diff > 0 ? '+' : ''}${r.diff}</td><td>${r.streak}</td></tr>`).join('')}</table>
+      ${rows.map((r, i) => `<tr${i === seedCut - 1 ? ' class="cut"' : ''}><td>${i + 1}. ${this.chip(r.id)} <span class="tname">${esc(r.team.name)}</span></td><td>${r.w}</td><td>${r.l}</td><td>${r.t}</td><td>${pct(r)}</td><td>${r.pf}</td><td>${r.pa}</td><td>${r.diff > 0 ? '+' : ''}${r.diff}</td><td>${r.streak}</td></tr>`).join('')}</table>
       <div style="color:var(--muted);font-size:11.5px;margin-top:4px">Top ${seedCut} make the playoffs.</div>`;
     }
     let slate = '';
@@ -85,7 +110,9 @@ export class SeasonUI {
         <div class="actions" style="justify-content:flex-start"><button class="primary" id="se-next">Start Season ${S.year + 1}</button><button id="se-reset">Delete season</button></div>`;
     } else {
       const label = S.phase === 'playoffs' ? S.playoffs.rounds[S.playoffs.rounds.length - 1][0].playoff.replace(/^[A-Z]{3} (?=Wild|Div|Champ)/, '') : `Week ${S.week + 1}`;
-      slate = `<h3 class="se-h3">${label}</h3>
+      const playing = new Set(games.flatMap((g) => [g.home, g.away]).concat((S.weeks[S.week]?.games || []).flatMap((g) => [g.home, g.away])));
+      const byes = S.phase === 'regular' ? S.teams.filter((id) => !playing.has(id)) : [];
+      slate = `<h3 class="se-h3">${label}</h3>${byes.length ? `<div style="color:var(--muted);font-size:12px;margin:-2px 0 6px">Bye: ${byes.map((id) => this.chip(id)).join(' ')}</div>` : ''}
         <div class="se-games">${games.map((g, i) => `<div class="se-game"><span>${this.chip(g.away)}${seed(g.away)} @ ${this.chip(g.home)}${seed(g.home)}${g.playoff && /^[A-Z]{3} /.test(g.playoff) ? ` <span style="color:var(--muted)">${esc(g.playoff.slice(0, 3))}</span>` : ''}</span>
           <span><button data-watch="${i}">Watch</button> <button data-sim="${i}">Sim</button></span></div>`).join('')}</div>
         ${this.lastResults()}
@@ -118,23 +145,35 @@ export class SeasonUI {
     if (!done.length) return '';
     return `<h3 class="se-h3">Results</h3><div class="se-games">${done.map((g) => {
       const r = g.result, hw = r.homeScore > r.awayScore;
-      return `<div class="se-game"><span>${this.chip(g.away)} <b style="${!hw ? 'color:var(--accent)' : ''}">${r.awayScore}</b> @ ${this.chip(g.home)} <b style="${hw ? 'color:var(--accent)' : ''}">${r.homeScore}</b>${r.ot ? ' <span style="color:var(--muted)">OT</span>' : ''}</span><span style="color:var(--muted)">${g.playoff || ''}</span></div>`;
+      return `<div class="se-game"><span>${this.chip(g.away)} <b style="${!hw ? 'color:var(--accent)' : ''}">${r.awayScore}</b> @ ${this.chip(g.home)} <b style="${hw ? 'color:var(--accent)' : ''}">${r.homeScore}</b>${r.ot ? ' <span style="color:var(--muted)">OT</span>' : ''}</span><span style="color:var(--muted)">${g.playoff || (r.real ? 'real result' : '')}</span></div>`;
     }).join('')}</div>`;
   }
 
   renderLeaders(body) {
     const S = this.season;
     const L = leaders(S, 8, this.leaderSrc);
-    body.innerHTML = `<div class="pos-filter">${['season', 'career'].map((k) => `<button data-src="${k}" class="${this.leaderSrc === k ? 'on' : ''}">${k === 'season' ? `Season ${S.year}` : 'Career'}</button>`).join('')}</div>
-      <div class="se-leaders">${Object.entries(LEADER_CATS).map(([k, c]) => `<div><h3 class="se-h3">${c.label}</h3><table class="stats">${(L[k] || []).map((r, i) =>
-        `<tr><td>${i + 1}. ${esc(r.name)} <span style="color:var(--muted)">${r.pos} · ${esc(r.team)}</span></td><td><b>${r.v}</b></td></tr>`).join('') || '<tr><td style="color:var(--muted)">No games yet</td></tr>'}</table></div>`).join('')}</div>`;
+    // imported leagues: put each leader's real stat line from last season beside the sim number
+    const lg = this.deps.getLeague();
+    const realOf = new Map();
+    for (const t of lg.teams) for (const p of t.roster) if (p.real) realOf.set(p.id, p.real);
+    const realYr = realOf.size ? [...realOf.values()][0].season : null;
+    const cmp = this.compareReal && realYr;
+    body.innerHTML = `<div class="st-bar"><div class="pos-filter">${['season', 'career'].map((k) => `<button data-src="${k}" class="${this.leaderSrc === k ? 'on' : ''}">${k === 'season' ? `Season ${S.year}` : 'Career'}</button>`).join('')}</div>
+      ${realYr ? `<label class="tog"><input type="checkbox" id="se-cmp" ${cmp ? 'checked' : ''} /> Compare with real ${realYr} stats</label>` : ''}</div>
+      <div class="se-leaders">${Object.entries(LEADER_CATS).map(([k, c]) => `<div><h3 class="se-h3">${c.label}</h3><table class="stats">${cmp ? `<tr><th></th><th>Sim</th><th>Real ${realYr}</th></tr>` : ''}${(L[k] || []).map((r, i) => {
+        const rl = cmp ? realAsLine(realOf.get(r.pid)) : null;
+        return `<tr><td>${i + 1}. ${this.stats.link(r.pid, r.name)} <span style="color:var(--muted)">${r.pos} · ${esc(r.team)}</span></td><td><b>${r.v}</b></td>${cmp ? `<td style="color:var(--muted)">${rl ? c.get(rl) : '—'}</td>` : ''}</tr>`;
+      }).join('') || '<tr><td style="color:var(--muted)">No games yet</td></tr>'}</table></div>`).join('')}</div>`;
     body.querySelectorAll('[data-src]').forEach((b) => { b.onclick = () => { this.leaderSrc = b.dataset.src; this.render(); }; });
+    const cb = body.querySelector('#se-cmp'); if (cb) cb.onchange = () => { this.compareReal = cb.checked; this.render(); };
+    this.stats.bindLinks(body);
   }
 
   renderInjuries(body) {
     const inj = Object.values(this.season.injuries);
-    body.innerHTML = inj.length ? `<table class="stats"><tr><th>Player</th><th>Team</th><th>Injury</th><th>Weeks out</th></tr>${inj.sort((a, b) => b.weeks - a.weeks).map((i) =>
-      `<tr><td>${esc(i.name)}</td><td>${this.chip(i.team)}</td><td>${esc(i.part)}</td><td>${i.weeks}</td></tr>`).join('')}</table>` : '<p style="color:var(--muted)">No one is injured right now.</p>';
+    const tag = (i) => i.seasonEnding ? '<b style="color:var(--bad)">Season-ending IR</b>' : i.ir ? `<b style="color:var(--bad)">IR</b> · ${i.weeks} wk` : i.weeks <= 1 ? 'Questionable' : `Out · ${i.weeks} wk`;
+    body.innerHTML = inj.length ? `<table class="stats"><tr><th>Player</th><th>Team</th><th>Injury</th><th>Status</th></tr>${inj.sort((a, b) => b.weeks - a.weeks).map((i) =>
+      `<tr><td>${esc(i.name)}${i.pos ? ` <span style="color:var(--muted)">${i.pos}</span>` : ''}</td><td>${this.chip(i.team)}</td><td>${esc(i.part)}</td><td>${tag(i)}</td></tr>`).join('')}</table>` : '<p style="color:var(--muted)">No one is injured right now.</p>';
   }
 
   renderHistory(body) {
@@ -167,9 +206,43 @@ export class SeasonUI {
     this.save();
   }
 
-  // Simulate games without blocking the page: play-by-play chunks with progress.
-  async simGames(games) {
-    if (this.busy || !games.length) return;
+  // Simulate games without blocking the page: in parallel Web Workers when available,
+  // otherwise play-by-play chunks on the main thread with progress.
+  async simGames(games, pool) {
+    if ((this.busy && !pool) || !games.length) return;
+    const own = !pool;
+    if (own) pool = SimPool.create(this.deps.getLeague());
+    try {
+      if (pool && !pool.broken) {
+        try { await this.simParallel(games, pool); return; } catch (e) { console.warn('Worker simulation failed; using the main thread.', e); }
+      }
+      await this.simMainThread(games.filter((g) => !g.result));
+    } finally {
+      if (own && pool) pool.terminate();
+      this.busy = false;
+      this.render();
+    }
+  }
+
+  async simParallel(games, pool) {
+    const lg = this.deps.getLeague();
+    const out = [...outPlayers(this.season)];
+    let done = 0;
+    const label = this.season.phase === 'playoffs' ? 'playoff' : `week ${this.season.weeks[this.season.week]?.week ?? this.season.week + 1}`;
+    this.busy = `Simulating ${label}: 0/${games.length} games...`;
+    this.render();
+    await Promise.all(games.map((g) => pool.run({ home: g.home, away: g.away, out, noTie: !!g.playoff }).then((res) => {
+      if (g.result) return;
+      recordGame(this.season, lg, g, res);
+      this.afterRecord();
+      done++;
+      this.busy = `Simulating ${label}: ${done}/${games.length} games...`;
+      const st = this.root.querySelector('#se-status');
+      if (st) st.textContent = this.busy;
+    })));
+  }
+
+  async simMainThread(games) {
     const lg = this.deps.getLeague();
     for (const g of games.slice()) {
       const game = createSeasonGame(this.season, lg, g);
@@ -190,16 +263,24 @@ export class SeasonUI {
       recordGame(this.season, lg, g, game);
       this.afterRecord();
     }
-    this.busy = false;
-    this.render();
   }
 
   async simUntil(stop) {
-    let guard = 0;
-    while (!stop() && guard++ < 60) {
-      const games = currentGames(this.season);
-      if (!games.length) break;
-      await this.simGames(games);
+    if (this.busy) return;
+    const pool = SimPool.create(this.deps.getLeague());
+    try {
+      let guard = 0;
+      while (!stop() && guard++ < 60) {
+        const games = currentGames(this.season);
+        if (!games.length) break;
+        this.busy = 'Simulating...';
+        await this.simGames(games, pool);
+      }
+    } finally {
+      pool?.terminate();
+      this.busy = false;
+      this.render();
     }
   }
+
 }

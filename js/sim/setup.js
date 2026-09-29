@@ -12,7 +12,7 @@ const FALLBACK = {
 };
 
 // Fatigue at which a starter comes off for a breather (if a fresher backup exists).
-const ROTATE_AT = { DE: 0.74, DT: 0.74, RB: 0.76, FB: 0.62, LB: 0.6, CB: 0.55, S: 0.55, WR: 0.52, TE: 0.56, OL: 0.42, QB: 0, K: 0, P: 0 };
+const ROTATE_AT = { DE: 0.74, DT: 0.74, RB: 0.82, FB: 0.62, LB: 0.6, CB: 0.55, S: 0.55, WR: 0.52, TE: 0.56, OL: 0.42, QB: 0, K: 0, P: 0 };
 
 export class Picker {
   constructor(team, unavailable) {
@@ -30,6 +30,13 @@ export class Picker {
           const fresh = list.slice(1).find((p) => (energy.get(p.id) ?? 1) > e0 + 0.15 && p.ovr >= pl.ovr - 16);
           if (fresh) pl = fresh;
         }
+      }
+      // Backfield committees: the RB2 gets a share of the snaps even when the starter is fresh
+      // (less of one behind a workhorse).
+      if (pl && p2 === 'RB' && pos === 'RB' && CTX?.rng && list.length > 1 && pl === list[0]) {
+        const rb2 = list[1];
+        const share = (pl.traits || []).includes('workhorse') ? 0.12 : 0.26;
+        if (rb2.ovr >= pl.ovr - 22 && CTX.rng.chance(share)) pl = rb2;
       }
       if (pl) { this.used.add(pl.id); return pl; }
     }

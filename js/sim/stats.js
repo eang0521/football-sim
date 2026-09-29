@@ -3,7 +3,7 @@ const blank = () => ({
   pass: { att: 0, cmp: 0, yds: 0, td: 0, int: 0, sack: 0, sackYds: 0 },
   rush: { car: 0, yds: 0, td: 0, long: 0 },
   rec: { tgt: 0, rec: 0, yds: 0, td: 0, long: 0 },
-  def: { tkl: 0, ast: 0, sack: 0, tfl: 0, int: 0, pd: 0, ff: 0, fr: 0 },
+  def: { tkl: 0, ast: 0, sack: 0, tfl: 0, int: 0, pd: 0, ff: 0, fr: 0, blk: 0 },
   kick: { fga: 0, fgm: 0, long: 0, xpa: 0, xpm: 0, ko: 0, tb: 0 },
   punt: { punts: 0, yds: 0, in20: 0, tb: 0 },
   ret: { kr: 0, kryds: 0, pr: 0, pryds: 0, td: 0 },
@@ -44,7 +44,7 @@ export class Stats {
           if (e.rec) L.rec.long = Math.max(L.rec.long, e.yds || 0);
           break;
         case 'def':
-          for (const k of ['tkl', 'ast', 'sack', 'tfl', 'int', 'pd', 'ff', 'fr']) L.def[k] += e[k] || 0;
+          for (const k of ['tkl', 'ast', 'sack', 'tfl', 'int', 'pd', 'ff', 'fr', 'blk']) L.def[k] += e[k] || 0;
           break;
         case 'kick':
           for (const k of ['fga', 'fgm', 'xpa', 'xpm', 'ko', 'tb']) L.kick[k] += e[k] || 0;

@@ -1,3 +1,4 @@
+import { startRecording, recordFrame } from './replay.js';
 // Core per-play simulation: agents, physics, blocking, ball flight, catches, tackles.
 import { DT, FIELD_W, MID_Y, GRAVITY, PLAYER_R, ENGAGE_R, TACKLE_R, MAX_PLAY_TIME } from './constants.js';
 import { clamp, norm, angleDiff } from '../util/vec.js';
@@ -30,6 +31,7 @@ export class PlaySim {
     this.runStartT = null;
     this.result = null;
     this.deadT = 0;
+    if (cfg.record) startRecording(this);
     this.isRun = false;
     this.pass = null;
     this.run = null;
@@ -102,6 +104,7 @@ export class PlaySim {
   // Possible injury on a hit. base = probability scale for this collision.
   maybeInjure(a, base) {
     if (hasTrait(a.p, 'iron_man')) base *= 0.5;
+    base *= Math.exp((75 - (a.p.dur ?? 75)) / 25); // durable players hold up; fragile ones don't
     if (a.injured || this.kind === 'kneel' || !this.rng.chance(base)) return;
     a.injured = true;
     a.down = true; a.downT = 0; a.anim = 'down';
@@ -263,6 +266,7 @@ export class PlaySim {
 
   // ---------- main tick ----------
   step(dt = DT) {
+    if (this.rec) recordFrame(this);
     if (this.phase === 'lineup') return this.stepLineup(dt);
     if (this.phase === 'set') {
       this.phaseT += dt;
@@ -485,8 +489,11 @@ export class PlaySim {
       const engTime = this.t - (t.engT ?? this.t);
       // Interior rushers work in a phone booth against help; edge rushers have room to win.
       // Blocks in space on linebackers and DBs don't last as long as those at the line.
-      const slotK = t.fpos === 'DT' ? (passMode ? 0.6 : 0.55) : t.fpos === 'DE' ? (passMode ? 1.15 : 1) : passMode ? 1 : 1.8;
-      let lam = (passMode ? 0.255 : 0.115) * slotK * Math.exp((tSkill - bestB) / 18) / (1 + 1.8 * (n - 1));
+      const slotK = t.fpos === 'DT' ? (passMode ? 0.6 : 0.36) : t.fpos === 'DE' ? (passMode ? 1.15 : 1) : passMode ? 1 : 1.8;
+      // Rating edge saturates: a big mismatch wins more often, but not exponentially more (keeps
+      // wide talent gaps, like real rosters have, from snowballing into sacks and stuffs).
+      const edge = 2 / (1 + Math.exp(-(tSkill - bestB) / 9));
+      let lam = (passMode ? 0.25 : 0.115) * slotK * edge / (1 + 1.8 * (n - 1));
       if (engTime < (passMode ? 0.45 : 0.8)) lam *= 0.25;
       if (passMode) lam *= 1 + Math.max(0, engTime - 1.8) * 0.5;
       // near the ball carrier a defender fights off the block; in space that's much easier
@@ -623,7 +630,7 @@ export class PlaySim {
       const d = first.a;
       // an underneath defender in the throwing lane, away from the receiver: QBs throw over and
       // around these, so the ball usually gets by him
-      if (P.target && Math.hypot(d.x - P.target.x, d.y - P.target.y) > 3 && rng.chance(0.6)) { P.ignore.add(d); return; }
+      if (P.target && Math.hypot(d.x - P.target.x, d.y - P.target.y) > 3 && rng.chance(d.fpos === 'LB' ? 0.8 : 0.6)) { P.ignore.add(d); return; }
       const contested = offNear.length && offNear[0].d < 1.2;
       let pInt = (0.07 + d.r.cth / 100 * 0.17 + (d.r.awr - 70) / 600) * (hasTrait(d.p, 'ball_hawk') ? 1.4 : 1);
       if (contested) pInt *= 0.55;
@@ -654,12 +661,13 @@ export class PlaySim {
       const phase = n.d <= rD + 0.25 ? 1 : 0.3;
       // a trailing defender who grabs to recover: pass interference
       if (phase < 1 && n.d < 1.3 && airY > 6 && rng.chance(0.07 * (airY > 18 ? 1.6 : 1))) this.foul('dpi', d, B.x, B.y);
-      const pPlay = (0.09 + skill * 0.36) * (1 - (n.d / R) ** 2) * tracking * depthK * phase;
+      const cover = d.fpos === 'CB' ? 1.3 : d.fpos === 'S' ? 1.1 : 0.5; // DBs are the ones trained to play the ball
+      const pPlay = (0.09 + skill * 0.36) * cover * (1 - (n.d / R) ** 2) * tracking * depthK * phase;
       if (rng.chance(pPlay)) {
         // contact at the catch point: pass interference (worse if not looking back for the ball)
         if (airY > 4 && n.d < 1.2 && rng.chance((tracking < 1 ? 0.45 : 0.2) * (airY > 18 ? 1.5 : 1))) {
           this.foul('dpi', d, B.x, B.y);
-        } else if (rng.chance((0.1 + d.r.cth / 100 * 0.17) * (hasTrait(d.p, 'ball_hawk') ? 1.5 : 1)) && inBounds) return this.interception(d);
+        } else if (rng.chance((0.17 + d.r.cth / 100 * 0.26) * (hasTrait(d.p, 'ball_hawk') ? 1.5 : 1)) && inBounds) return this.interception(d);
         this.st.pbu = d;
         this.whistle('incomplete', this.los);
         B.vz = 2; B.vy += rng.normal(0, 3);
@@ -801,7 +809,7 @@ export class PlaySim {
     }
     // fumble
     const pocketQB = c.role === 'qb' && !c.d.runner;
-    const pF = (0.006 + (100 - c.r.car) / 100 * 0.028) * (pocketQB ? 2.2 : 1) * (helpers ? 1.3 : 1) * (hasTrait(o.p, 'hard_hitter') ? 1.5 : 1) * (this.cfg.weather?.fumbleK ?? 1);
+    const pF = (0.0045 + (100 - c.r.car) / 100 * 0.022) * (pocketQB ? 2.6 : 1) * (helpers ? 1.3 : 1) * (hasTrait(o.p, 'hard_hitter') ? 1.5 : 1) * (this.cfg.weather?.fumbleK ?? 1);
     if (!this.st.kneel && this.rng.chance(pF) && !((spot >= 100 && c.side === 'O') || (spot <= 0 && c.side === 'D'))) {
       return this.fumble(c, o, spot);
     }

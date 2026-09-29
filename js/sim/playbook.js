@@ -89,6 +89,17 @@ export const FORMATIONS = {
       Y: { pos: 'TE', dx: -1.0, dy: -3.9 },
     },
   },
+  gun_12: {
+    name: 'Shotgun Y-Off (12)', personnel: '12', qb: 'gun',
+    slots: {
+      ...OL, QB: { pos: 'QB', dx: -5, dy: 0 },
+      F: { pos: 'RB', dx: -5, dy: -1.6 },
+      X: { pos: 'WR', dx: -0.8, dy: 15, field: true },
+      Z: { pos: 'WR', dx: -1.6, dy: -15, field: true },
+      Y: { pos: 'TE', dx: -1.0, dy: -3.9 },
+      H: { pos: 'TE', dx: -2.2, dy: 2.2 },
+    },
+  },
   goal_line: {
     name: 'Goal Line', personnel: '22', qb: 'uc',
     slots: {
@@ -143,8 +154,8 @@ export function defaultRoute(pos) {
   return 'go';
 }
 
-const QUICK = ['gun_doubles', 'gun_trips', 'gun_spread', 'singleback', 'pistol'];
-const GUNS = ['gun_doubles', 'gun_trips', 'gun_spread', 'pistol'];
+const QUICK = ['gun_doubles', 'gun_trips', 'gun_spread', 'singleback', 'pistol', 'gun_12'];
+const GUNS = ['gun_doubles', 'gun_trips', 'gun_spread', 'pistol', 'gun_12'];
 const UC = ['singleback', 'ace_12', 'iform', 'pistol'];
 const ALLF = Object.keys(FORMATIONS).filter((f) => f !== 'goal_line');
 
@@ -188,6 +199,9 @@ export const PASS_PLAYS = [
     routes: { X: 'post', Z: 'go', Y: 'cross', H: 'dig', A: 'flat', F: 'block' }, prog: ['X', 'Z', 'Y', 'H', 'A'] },
   { id: 'pa_cross', name: 'PA Crossers', forms: UC, drop: '5', depth: 'medium', pa: true,
     routes: { X: 'dig', Z: 'post', Y: 'cross', H: 'drag', A: 'flat', F: 'block' }, prog: ['Y', 'X', 'H', 'A', 'Z'] },
+  // Last play of a half: max protect, everyone to the end zone, one heave
+  { id: 'hail', name: 'Hail Mary', forms: ['gun_spread', 'gun_trips', 'gun_doubles'], drop: '7', depth: 'hail', hail: true,
+    routes: { X: 'go', Z: 'go', H: 'go', A: 'go', Y: 'seam', F: 'block' }, prog: ['X', 'H', 'Z', 'A', 'Y'] },
   { id: 'gl_fade', name: 'Goal Line Fade', forms: ['goal_line', 'iform', 'ace_12'], drop: 'quick', depth: 'short',
     routes: { X: 'fade', Y: 'flat', H: 'stick', A: 'flat', Z: 'slant', F: 'block' }, prog: ['X', 'Y', 'H', 'A', 'Z'] },
   { id: 'gl_pa', name: 'PA Flat', forms: ['goal_line', 'iform', 'ace_12'], drop: '5', depth: 'short', pa: true,
@@ -197,15 +211,15 @@ export const PASS_PLAYS = [
 // Run plays. aim = lateral yards from ball of the designed hole (toward play side).
 export const RUN_PLAYS = [
   { id: 'iz', name: 'Inside Zone', scheme: 'zone', aim: 2.0, forms: Object.keys(FORMATIONS) },
-  { id: 'oz', name: 'Outside Zone', scheme: 'zone', aim: 6.5, forms: ['singleback', 'ace_12', 'iform', 'pistol', 'gun_doubles', 'gun_trips'] },
+  { id: 'oz', name: 'Outside Zone', scheme: 'zone', aim: 6.5, forms: ['singleback', 'ace_12', 'iform', 'pistol', 'gun_doubles', 'gun_trips', 'gun_12'] },
   { id: 'dive', name: 'Dive', scheme: 'zone', aim: 0.7, forms: ['iform', 'singleback', 'ace_12', 'goal_line', 'pistol'] },
-  { id: 'power', name: 'Power', scheme: 'power', aim: 2.6, forms: ['iform', 'ace_12', 'singleback', 'goal_line', 'pistol', 'gun_doubles'] },
+  { id: 'power', name: 'Power', scheme: 'power', aim: 2.6, forms: ['iform', 'ace_12', 'singleback', 'goal_line', 'pistol', 'gun_doubles', 'gun_12'] },
   { id: 'toss', name: 'Toss', scheme: 'toss', aim: 8.5, forms: ['iform', 'singleback', 'ace_12', 'pistol'] },
-  { id: 'draw', name: 'Draw', scheme: 'draw', aim: 0.8, forms: ['gun_doubles', 'gun_trips', 'gun_spread', 'pistol'] },
+  { id: 'draw', name: 'Draw', scheme: 'draw', aim: 0.8, forms: ['gun_doubles', 'gun_trips', 'gun_spread', 'pistol', 'gun_12'] },
   { id: 'sneak', name: 'QB Sneak', scheme: 'sneak', aim: 0.4, forms: ['singleback', 'ace_12', 'iform', 'goal_line'] },
   // option family: the QB reads one defender at the mesh
-  { id: 'zone_read', name: 'Zone Read', scheme: 'zone', aim: 2.0, option: 'read', forms: ['gun_doubles', 'gun_trips', 'gun_spread', 'pistol'] },
-  { id: 'rpo_slant', name: 'RPO Slant', scheme: 'zone', aim: 2.0, rpo: { slot: 'X', route: 'slant' }, forms: ['gun_doubles', 'gun_trips', 'gun_spread', 'pistol'] },
+  { id: 'zone_read', name: 'Zone Read', scheme: 'zone', aim: 2.0, option: 'read', forms: ['gun_doubles', 'gun_trips', 'gun_spread', 'pistol', 'gun_12'] },
+  { id: 'rpo_slant', name: 'RPO Slant', scheme: 'zone', aim: 2.0, rpo: { slot: 'X', route: 'slant' }, forms: ['gun_doubles', 'gun_trips', 'gun_spread', 'pistol', 'gun_12'] },
   { id: 'rpo_bubble', name: 'RPO Bubble', scheme: 'zone', aim: 2.0, rpo: { slot: 'H', route: 'bubble' }, forms: ['gun_doubles', 'gun_trips', 'gun_spread'] },
 ];
 

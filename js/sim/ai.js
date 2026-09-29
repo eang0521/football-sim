@@ -271,6 +271,7 @@ function qbPass(sim, qb) {
     P.minRead = P.drop === 'quick' ? 0.6 : P.drop === '5' ? 1.35 : 1.8;
     if (P.pa) P.minRead += 0.45;
     P.hot = sim.def.filter((d) => d.role === 'rush').length >= 6;
+    P.hail = !!sim.cfg.offCall?.play?.hail;
     if (sim.disguised) {
       // the post-snap picture isn't what he saw pre-snap: slower, noisier reads (awareness helps)
       P.readBonus = (P.readBonus || 1) * (1.45 - qb.r.awr / 250);
@@ -328,7 +329,9 @@ function qbPass(sim, qb) {
     }
     return;
   }
-  if (t < P.minRead - 0.1 || sim.noThrow) return;
+  if (sim.noThrow) return;
+  if (P.hail) return hailMary(sim, qb);
+  if (t < P.minRead - 0.1) return;
   if (t - P.lastEval < 0.1) return;
   P.lastEval = t;
   const prog = P.prog.map((l) => sim.bySlotO[l]).filter(Boolean);
@@ -360,24 +363,27 @@ function qbPass(sim, qb) {
   if (late || underDuress) {
     // scan everything: take the best option available
     let best = null;
+    // Under duress the QB only really sees the receiver he's on and his checkdown, and he reads it worse.
+    const panic = underDuress ? 1.9 - qb.r.awr / 100 : 1;
     for (const r of sim.off) {
       if (r.role !== 'route') continue;
       const ev = evaluateTarget(sim, qb, r);
       if (!ev || ev.notReady) continue;
       const air = ev.c.x - los;
-      let val = ev.score + noise() + Math.min(air, 15) * 0.03 - Math.max(0, air - 18) * 0.05 + favor(sim, r);
+      let val = ev.score + noise() * panic + Math.min(air, 15) * 0.03 - Math.max(0, air - 18) * 0.05 + favor(sim, r);
+      if (underDuress && !late && r !== P.look && r.fpos !== 'RB' && !['check', 'flat', 'swing'].includes(r.d.route?.name)) val -= 0.22;
       // on 3rd/4th down a throw that reaches the marker is worth more than a safe checkdown
       if (sim.ctx?.down >= 3) val += ev.c.x >= toGoX - 0.5 ? (mustConvert(sim) ? 0.4 : 0.22) : -0.12;
       if (!best || val > best.val) best = { ...ev, val };
     }
-    const need = underDuress ? 0.25 : 0.15 - (timeSet - 1.5) * 0.07;
+    const need = underDuress ? 0.32 : 0.15 - (timeSet - 1.5) * 0.07;
     if (best && best.val > need) { P.path = underDuress ? 'duress' : 'late'; return startThrow(sim, qb, best); }
     if (underDuress || timeSet > 3.2) {
       // escape: scramble, throw it away, or hang on (and maybe take the sack)
       if (P.escapeT && sim.t < P.escapeT) return;
       P.escapeT = sim.t + 0.35;
       const lane = scrambleLane(sim, qb);
-      const scr = hasTrait(qb.p, 'scrambler') ? 2 : hasTrait(qb.p, 'pocket_passer') ? 0.3 : 1;
+      const scr = hasTrait(qb.p, 'scrambler') ? 1.5 : hasTrait(qb.p, 'pocket_passer') ? 0.3 : 1;
       if (lane > 0.5 && sim.rng.chance((0.2 + qb.r.spd / 300) * scr)) {
         qb.d.scramble = true; sim.startRun(qb); sim.note('scramble', qb); return;
       }
@@ -407,6 +413,32 @@ function favor(sim, r) {
     P.trustMean = rs.length ? rs.reduce((s, o) => s + recvTrust(o), 0) / rs.length : 0;
   }
   return clamp((recvTrust(r) - P.trustMean) * 0.008, -0.08, 0.08);
+}
+
+// Hail Mary: wait for the receivers to get downfield, then loft it to the deepest one, as far as the arm allows.
+function hailMary(sim, qb) {
+  const P = sim.pass;
+  const { ttc } = freeRushers(sim, qb, 4.5);
+  if (sim.t < 2.6 && !(sim.t > 1.6 && ttc < 0.35)) return;
+  const rs = sim.off.filter((o) => o.role === 'route' && !o.down).sort((a, b) => b.x - a.x);
+  const r = rs[0];
+  if (!r) return throwAway(sim, qb);
+  const reach = 40 + qb.r.thp * 0.22;
+  const T = 2.4 + sim.rng.range(0, 0.3);
+  const c0 = predictRoutePos(r, T);
+  const dx = c0.x - qb.x, dy = c0.y - qb.y, d = Math.hypot(dx, dy);
+  const k = Math.min(1, reach / d);
+  const c = { x: Math.min(108, qb.x + dx * k), y: qb.y + dy * k };
+  const dist = Math.hypot(c.x - qb.x, c.y - qb.y);
+  P.path = 'hail';
+  const ev = { c, lob: true, d: dist, T: dist / throwSpeed(qb, dist, true), v: throwSpeed(qb, dist, true), r, score: 0 };
+  P.throwing = true;
+  sim.after(0.16, () => {
+    if (sim.ball.holder !== qb || sim.phase !== 'live') return;
+    P.throwing = false; P.thrown = true;
+    sim.throwBall(qb, r, ev);
+  });
+  qb.anim = 'throw'; qb.animT = 0;
 }
 
 function scrambleLane(sim, qb) {
@@ -785,6 +817,12 @@ function zoneThink(sim, a) {
   const R = sim.run;
   if (sim.isRun && R && !R.rpo && !R.option && R.scheme !== 'draw' && !sim.carrierAgent()?.d.runner) {
     const deep = !!z.deep;
+    // a linebacker who diagnoses it fast shoots the gap instead of scraping (big play either way)
+    if (a.fpos === 'LB' && a.d.shoot == null) a.d.shoot = sim.rng.chance(clamp(0.2 + (a.r.awr - 70) / 200 + (a.r.spd - 75) / 250, 0.04, 0.35));
+    if (a.d.shoot && sim.t > 0.12) {
+      goTo(a, sim.los - 1.2, R.holeY + (a.y - R.holeY) * 0.25, a.maxSpd, false);
+      return;
+    }
     if (sim.t > 0.3 + (100 - a.r.awr) / 250 + (deep ? 0.15 : 0)) {
       const fx = deep ? Math.max(sim.los + 6, a.x - 3) : sim.los + 2.5;
       goTo(a, fx, a.y + (R.holeY - a.y) * (deep ? 0.35 : 0.5), a.maxSpd * (deep ? 0.6 : 0.8), true);

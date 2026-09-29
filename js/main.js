@@ -6,6 +6,7 @@ import { Hud, renderBoxScore, readable, shade } from './ui/hud.js';
 import { TeamEditor } from './ui/editor.js';
 import { SeasonUI } from './ui/seasonui.js';
 import { DT } from './sim/constants.js';
+import { ReplaySim } from './sim/replay.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -31,11 +32,14 @@ function startGame(home, away, opts) {
 function attachGame(game) {
   const home = game.teams.home, away = game.teams.away;
   S.game = game;
+  game.recording = true; // keep frames for instant replay and highlights
+  S.replay = null;
   S.sim = null; S.acc = 0; S.waiting = false; S.overShown = false;
   S.lastShown = S.game.s.clock; S.lastQ = 1;
   renderer.setTeams(home, away);
   renderer.setWeather(S.game.weather);
   hud.reset(S.game);
+  hud.showWP(S.game);
   setPaused(false);
   window.__game = S.game; // handy for debugging in the console
 }
@@ -60,6 +64,7 @@ function finishPlay(sim) {
   sim.applied = true;
   S.lastShown = liveClock(sim);
   hud.showResult(sim);
+  hud.showWP(S.game);
   hud.update(S.lastShown);
   hud.syncLog();
 }
@@ -135,6 +140,7 @@ async function bulkSim(untilQuarterEnd) {
   S.lastShown = g.s.clock; S.lastQ = g.s.quarter; S.clockFrom = null;
   S.bulk = false;
   setBusy(false);
+  hud.showWP(g);
   hud.update(); hud.syncLog();
   if (g.s.final) onGameOver();
   else hud.toast(`${untilQuarterEnd ? 'Quarter' : 'Game'} simulated — resuming live play`);
@@ -164,6 +170,14 @@ let last = performance.now();
 function frame(now) {
   const dt = Math.min(0.1, (now - last) / 1000);
   last = now;
+  if (S.replay) {
+    const R = S.replay;
+    if (!S.paused) R.cur.step(dt * S.speed);
+    renderer.update(R.cur, S.game, dt * (S.paused ? 0 : S.speed), now);
+    if (R.cur.done) nextReplay();
+    requestAnimationFrame(frame);
+    return;
+  }
   if (S.game && !S.paused && !S.bulk) {
     S.acc += dt * S.speed;
     let n = 0;
@@ -177,6 +191,39 @@ requestAnimationFrame(frame);
 // Debug hooks (console): advance the sim n ticks and render once.
 window.__S = S;
 window.__advance = (n = 60) => { for (let i = 0; i < n; i++) tickSim(); renderer.update(S.sim, S.game, 1 / 60, performance.now()); hud.update(displayClock()); return S.sim && { phase: S.sim.phase, t: +S.sim.t.toFixed(2) }; };
+
+// ---------------- Replays ----------------
+function playReplays(list, title) {
+  if (!list.length) { hud.toast('Nothing to replay yet.'); return; }
+  if (S.bulk) return;
+  S.replay = { queue: list.slice(), title, resume: { sim: S.sim } };
+  document.body.classList.add('replaying');
+  nextReplay();
+}
+function nextReplay() {
+  const R = S.replay;
+  const rec = R.queue.shift();
+  if (!rec) return endReplay();
+  R.cur = new ReplaySim(rec);
+  renderer.updateOverlays(R.cur, S.game);
+  if (renderer.art) renderer.art.visible = false;
+  const n = R.total ?? (R.total = R.queue.length + 1);
+  const idx = n - R.queue.length;
+  const wp = rec.wp0 != null ? ` · home WP ${Math.round(rec.wp0 * 100)}% → ${Math.round(rec.wp1 * 100)}%` : '';
+  hud.banner(`${R.title}${n > 1 ? ` ${idx}/${n}` : ''}`, `Q${Math.min(rec.q, 5)} ${rec.prefix ? rec.prefix + ': ' : ''}${rec.desc}${wp}`);
+}
+function endReplay() {
+  S.replay = null;
+  document.body.classList.remove('replaying');
+  hud.hideBanner();
+  if (S.sim) { renderer.updateOverlays(S.sim, S.game); renderer.buildArt(S.sim); }
+}
+$('btn-replay').addEventListener('click', () => { if (S.replay) return endReplay(); const r = S.game?.replays || []; playReplays(r.slice(-1), 'REPLAY'); });
+$('btn-hl').addEventListener('click', () => {
+  if (S.replay) return endReplay();
+  const H = (S.game?.highlights || []).slice().sort((a, b) => a.q - b.q || b.clock - a.clock); // in game order
+  playReplays(H, 'HIGHLIGHTS');
+});
 
 // ---------------- Controls ----------------
 $('btn-play').addEventListener('click', () => setPaused(!S.paused));
@@ -196,7 +243,8 @@ window.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
   if (!document.querySelector('.modal:not(.hidden)')) {
     if (e.code === 'Space') { e.preventDefault(); setPaused(!S.paused); }
-    if (e.key === 'n' || e.key === 'N') nextPlay();
+    if (e.key === 'n' || e.key === 'N') { if (S.replay) endReplay(); else nextPlay(); }
+    if (e.key === 'r' || e.key === 'R') $('btn-replay').click();
     const cams = ['broadcast', 'high', 'endzone', 'follow', 'sky', 'free'];
     if (e.key >= '1' && e.key <= '6') setCam(cams[+e.key - 1]);
   }
@@ -267,6 +315,8 @@ $('ng-start').addEventListener('click', () => {
     quarterLen: +$('ng-qlen').value,
     weather: $('ng-weather').value,
     seed: seedV === '' ? undefined : +seedV,
+    // imported leagues: players currently out (IR, out, doubtful, suspended) sit this one out
+    out: new Set([league.teams[hi], league.teams[ai]].flatMap((t) => t.roster.filter((p) => ['IR', 'Out', 'Doubtful', 'Suspended'].includes(p.injury?.status)).map((p) => p.id))),
   });
 });
 

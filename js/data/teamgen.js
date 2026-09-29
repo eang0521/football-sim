@@ -91,6 +91,7 @@ export function generatePlayer(rng, pos, quality, usedNumbers) {
   };
   p.ovr = computeOvr(p);
   p.traits = rollTraits(rng, pos, p.ovr);
+  p.dur = clampR(rng.normal(78, 9)); // durability: how well he holds up to hits
   return p;
 }
 
@@ -142,7 +143,8 @@ export function generateLeague(seed = 12345) {
 export const depthScore = (p) => p.ovr + (p.madden?.adj || 0);
 export function depthChart(team) {
   const d = {};
-  for (const pos of POSITIONS) d[pos] = team.roster.filter((p) => p.pos === pos).sort((a, b) => depthScore(b) - depthScore(a));
+  // players on an imported depth chart (depth = rank) come first, in that order
+  for (const pos of POSITIONS) d[pos] = team.roster.filter((p) => p.pos === pos).sort((a, b) => (a.depth ?? 1e4) - (b.depth ?? 1e4) || depthScore(b) - depthScore(a));
   return d;
 }
 

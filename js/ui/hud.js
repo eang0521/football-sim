@@ -1,5 +1,5 @@
 import { fmtClock, qName } from '../sim/game.js';
-import { COVERAGES } from '../sim/playbook.js';
+import { COVERAGES, FORMATIONS } from '../sim/playbook.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -63,7 +63,7 @@ export class Hud {
     const off = g.teams[m.off], def = g.teams[m.def];
     if (m.offCall && m.defCall) {
       const f = m.offCall.formation;
-      const formName = { gun_doubles: 'Gun Doubles', gun_trips: 'Gun Trips', gun_spread: 'Gun Spread', singleback: 'Singleback', ace_12: 'Ace 12', iform: 'I-Form', pistol: 'Pistol', goal_line: 'Goal Line' }[f] || f;
+      const formName = `${(FORMATIONS[f]?.name || f).replace('Shotgun', 'Gun').replace(/ \(\d+\)$/, '')} (${FORMATIONS[f]?.personnel || '11'})`;
       $('banner-top').innerHTML = `<span class="o">${esc(off.abbr)}: ${esc(formName)} — ${esc(m.offCall.name)}</span><span class="vs">vs</span><span class="d">${esc(def.abbr)}: ${esc(m.defCall.name)}</span>`;
       const cov = COVERAGES[m.defCall.cov];
       const blitz = (m.defCall.blitz || []).length;
@@ -88,6 +88,24 @@ export class Hud {
   }
 
   hideBanner() { $('banner').classList.add('hidden'); }
+
+  // Free-form banner (replays and highlights)
+  banner(top, sub) {
+    const b = $('banner');
+    b.className = 'replay';
+    $('banner-top').textContent = top;
+    $('banner-sub').textContent = sub || '';
+  }
+
+  // Win probability next to the scorebug (computed once per play, it isn't free)
+  showWP(game) {
+    const el = $('wp');
+    if (!el || !game) return;
+    const h = game.wpHome();
+    const lead = h >= 0.5 ? game.teams.home : game.teams.away;
+    el.textContent = `${lead.abbr} ${Math.round(Math.max(h, 1 - h) * 100)}%`;
+    el.title = `Win probability: ${game.teams.home.abbr} ${Math.round(h * 100)}% · ${game.teams.away.abbr} ${Math.round((1 - h) * 100)}%`;
+  }
 
   syncLog() {
     const g = this.game;
