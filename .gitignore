@@ -2,3 +2,4 @@ node_modules/
 .claude/
 *.cpuprofile
 .DS_Store
+private/

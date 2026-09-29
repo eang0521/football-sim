@@ -6,7 +6,10 @@ import { computeOvr } from '../data/teamgen.js';
 
 export const SEASON_VERSION = 1;
 
-// Double round-robin (circle method), home/away flipped in the second half.
+const MAX_WEEKS = 17;
+
+// Round-robin rounds (circle method). Small leagues play it twice (home/away flipped);
+// big leagues play 17 of the rounds once.
 function buildSchedule(ids, rng) {
   const t = ids.slice();
   rng.shuffle(t);
@@ -22,19 +25,74 @@ function buildSchedule(ids, rng) {
     rounds.push(games);
     arr.splice(1, 0, arr.pop()); // rotate all but the first
   }
-  const second = rounds.map((g) => g.map((x) => ({ home: x.away, away: x.home })));
-  return [...rounds, ...rng.shuffle(second)].map((games, w) => ({ week: w + 1, games: games.map((g) => ({ ...g, result: null })) }));
+  const all = n <= 10
+    ? [...rounds, ...rng.shuffle(rounds.map((g) => g.map((x) => ({ home: x.away, away: x.home }))))]
+    : rng.shuffle(rounds).slice(0, MAX_WEEKS);
+  return all.map((games, w) => ({ week: w + 1, games: games.map((g) => ({ ...g, result: null })) }));
+}
+
+// NFL format: 2 conferences x 4 divisions of 4 (teams carry `conf` and `div`).
+export function nflDivisions(league) {
+  const divs = {};
+  for (const t of league.teams) if (t.div && t.conf) (divs[t.div] ||= []).push(t.id);
+  const names = Object.keys(divs).sort();
+  const confs = new Set(league.teams.map((t) => t.conf));
+  if (names.length !== 8 || confs.size !== 2 || names.some((d) => divs[d].length !== 4)) return null;
+  return names.map((d) => ({ name: d, conf: league.teams.find((t) => t.div === d).conf, teams: divs[d] }));
+}
+
+// 17 games, no byes: home and away against each division rival (6), all four teams of a
+// same-conference division (4) and of an other-conference division (4), plus 3 more.
+// Every week is a perfect matching: either division games, or divisions paired off with a shift.
+function buildNflSchedule(divs, year, rng) {
+  const D = divs.map((d) => rng.shuffle(d.teams.slice()));
+  const confs = [...new Set(divs.map((d) => d.conf))];
+  const [A, N] = confs.map((c) => divs.map((d, i) => [d.conf, i]).filter(([k]) => k === c).map(([, i]) => i));
+  const rot = year % 3, x = year % 4;
+  const PAIRS = [[[0, 1], [2, 3]], [[0, 2], [1, 3]], [[0, 3], [1, 2]]];
+  const pairsIntra = (k) => PAIRS[k].flatMap(([a, b]) => [[A[a], A[b]], [N[a], N[b]]]);
+  const pairsCross = (off) => [0, 1, 2, 3].map((i) => [A[i], N[(i + off) % 4]]);
+  const vsDiv = (pairs, s, flip) => pairs.flatMap(([a, b]) => [0, 1, 2, 3].map((k) => {
+    const h = D[a][k], v = D[b][(k + s) % 4];
+    return (s + (k >> 1) + (flip ? 1 : 0)) % 2 ? { home: h, away: v } : { home: v, away: h }; // alternates for both sides
+  }));
+  const divWeek = (m, flip) => D.flatMap((t) => PAIRS[m].map(([a, b]) => (flip ? { home: t[b], away: t[a] } : { home: t[a], away: t[b] })));
+  const weeks = [
+    divWeek(0, false), divWeek(1, false), divWeek(2, false), divWeek(0, true), divWeek(1, true), divWeek(2, true),
+    ...[0, 1, 2, 3].map((s) => vsDiv(pairsIntra(rot), s, false)),
+    ...[0, 1, 2, 3].map((s) => vsDiv(pairsCross(x), s, true)),
+    vsDiv(pairsIntra((rot + 1) % 3), rng.int(0, 3), false),
+    vsDiv(pairsIntra((rot + 2) % 3), rng.int(0, 3), true),
+    vsDiv(pairsCross((x + 2) % 4), rng.int(0, 3), false),
+  ];
+  // the first 14 weeks give everyone 7 home games; host the last 3 so everyone ends with 8 or 9
+  const home = {};
+  for (const w of weeks.slice(14)) for (const g of w) {
+    const [a, b] = [g.home, g.away];
+    if ((home[b] || 0) < (home[a] || 0) || ((home[b] || 0) === (home[a] || 0) && rng.chance(0.5))) { g.home = b; g.away = a; }
+    home[g.home] = (home[g.home] || 0) + 1;
+  }
+  rng.shuffle(weeks);
+  // save a round of division games for the final week, like the NFL does
+  const isDiv = (w) => divs.some((d) => d.teams.includes(w[0].home) && d.teams.includes(w[0].away));
+  const last = weeks.findIndex(isDiv);
+  if (last >= 0) weeks.push(weeks.splice(last, 1)[0]);
+  return weeks.map((games, w) => ({ week: w + 1, games: games.map((g) => ({ ...g, result: null })) }));
 }
 
 export function createSeason(league, prev) {
   const rng = new RNG(Date.now() % 1e9);
   const ids = league.teams.map((t) => t.id);
+  const divs = nflDivisions(league);
+  const year = prev ? prev.year + 1 : 1;
   return {
     version: SEASON_VERSION,
-    year: prev ? prev.year + 1 : 1,
+    format: divs ? 'nfl' : 'bracket',
+    divisions: divs,
+    year,
     seed: rng.seed,
     teams: ids,
-    weeks: buildSchedule(ids, rng),
+    weeks: divs ? buildNflSchedule(divs, year, rng) : buildSchedule(ids, rng),
     week: 0,               // index of the current regular-season week
     phase: 'regular',      // 'regular' | 'playoffs' | 'done'
     playoffs: null,        // { rounds: [[game...], [game]] }
@@ -49,7 +107,9 @@ export function createSeason(league, prev) {
 // ---------- standings ----------
 export function standings(season, league) {
   const T = {};
-  for (const id of season.teams) T[id] = { id, w: 0, l: 0, t: 0, pf: 0, pa: 0, streak: '', h2h: {}, games: [] };
+  for (const id of season.teams) T[id] = { id, w: 0, l: 0, t: 0, pf: 0, pa: 0, streak: '', h2h: {}, games: [], dw: 0, dl: 0, dt: 0 };
+  const divOf = {};
+  for (const d of season.divisions || []) for (const id of d.teams) divOf[id] = d;
   for (const wk of season.weeks) for (const g of wk.games) {
     if (!g.result) continue;
     const { homeScore: hs, awayScore: as } = g.result;
@@ -59,6 +119,7 @@ export function standings(season, league) {
     const aRes = hRes === 'W' ? 'L' : hRes === 'L' ? 'W' : 'T';
     for (const [X, r, opp] of [[H, hRes, g.away], [A, aRes, g.home]]) {
       if (r === 'W') X.w++; else if (r === 'L') X.l++; else X.t++;
+      if (divOf[X.id] && divOf[X.id] === divOf[opp]) { if (r === 'W') X.dw++; else if (r === 'L') X.dl++; else X.dt++; }
       X.h2h[opp] = (X.h2h[opp] || 0) + (r === 'W' ? 1 : r === 'L' ? -1 : 0);
       X.games.push(r);
     }
@@ -68,10 +129,20 @@ export function standings(season, league) {
     let st = '', c = 0;
     for (let i = x.games.length - 1; i >= 0; i--) { if (!st) st = x.games[i]; if (x.games[i] === st) c++; else break; }
     return { ...x, gp, pct: gp ? (x.w + x.t * 0.5) / gp : 0, diff: x.pf - x.pa, streak: st ? `${st}${c}` : '-',
+      div: divOf[x.id]?.name || null, conf: divOf[x.id]?.conf || null,
       team: league.teams.find((t) => t.id === x.id) };
   });
-  rows.sort((a, b) => b.pct - a.pct || (b.h2h[a.id] || 0) - (a.h2h[b.id] || 0) || b.diff - a.diff || b.pf - a.pf);
+  rows.sort(rankCmp);
   return rows;
+}
+const rankCmp = (a, b) => b.pct - a.pct || (b.h2h[a.id] || 0) - (a.h2h[b.id] || 0) || b.diff - a.diff || b.pf - a.pf;
+
+// NFL seeding per conference: 4 division winners (1-4), then 3 wild cards (5-7).
+function nflSeeds(rows, conf) {
+  const C = rows.filter((r) => r.conf === conf);
+  const winners = [...new Set(C.map((r) => r.div))].map((d) => C.find((r) => r.div === d)).sort(rankCmp);
+  const wild = C.filter((r) => !winners.includes(r)).sort(rankCmp).slice(0, 3);
+  return [...winners, ...wild].map((r) => r.id);
 }
 
 // ---------- playing games ----------
@@ -146,24 +217,62 @@ function advance(season, league) {
         season.history.push({ year: season.year, champion: winners[0], runnerUp: f.home === winners[0] ? f.away : f.home,
           score: `${Math.max(f.result.homeScore, f.result.awayScore)}-${Math.min(f.result.homeScore, f.result.awayScore)}`,
           leaders: leaders(season, 1) });
+      } else if (season.playoffs.format === 'nfl') {
+        // reseed within each conference; the 1 seed rejoins after its bye
+        const S = season.playoffs.seeds, confs = Object.keys(S);
+        const left = {};
+        for (const c of confs) {
+          left[c] = winners.filter((w) => S[c].includes(w));
+          if (rounds.length === 1) left[c].push(S[c][0]);
+          left[c].sort((a, b) => S[c].indexOf(a) - S[c].indexOf(b));
+        }
+        if (confs.every((c) => left[c].length === 1)) {
+          const [a, b] = confs.map((c) => left[c][0]);
+          const st = standings(season, league).map((r) => r.id);
+          const [home, away] = st.indexOf(a) <= st.indexOf(b) ? [a, b] : [b, a];
+          rounds.push([{ home, away, playoff: 'Championship Game', result: null }]);
+        } else {
+          rounds.push(confs.flatMap((c) => pairUp(left[c], `${c} ${left[c].length === 2 ? 'Championship' : 'Divisional'}`)));
+        }
       } else {
         // reseed: best remaining seed hosts
         const seeds = season.playoffs.seeds;
         winners.sort((a, b) => seeds.indexOf(a) - seeds.indexOf(b));
-        rounds.push([{ home: winners[0], away: winners[1], playoff: 'Championship', result: null }]);
+        rounds.push(pairUp(winners, winners.length === 2 ? 'Championship' : 'Semifinal'));
       }
     }
   }
 }
 
+// Best remaining seed hosts the worst, and so on.
+function pairUp(seeded, label) {
+  const out = [];
+  for (let i = 0; i < seeded.length / 2; i++) out.push({ home: seeded[i], away: seeded[seeded.length - 1 - i], playoff: label, result: null });
+  return out;
+}
+
+export function playoffTeams(season) { return season.format === 'nfl' ? 14 : season.teams.length > 8 ? 8 : 4; }
+
 function startPlayoffs(season, league) {
   const st = standings(season, league);
-  const seeds = st.slice(0, 4).map((r) => r.id);
   season.phase = 'playoffs';
-  season.playoffs = { seeds, rounds: [[
-    { home: seeds[0], away: seeds[3], playoff: 'Semifinal', result: null },
-    { home: seeds[1], away: seeds[2], playoff: 'Semifinal', result: null },
-  ]] };
+  if (season.format === 'nfl') {
+    const confs = [...new Set(season.divisions.map((d) => d.conf))];
+    const seeds = Object.fromEntries(confs.map((c) => [c, nflSeeds(st, c)]));
+    // Wild Card round: 2v7, 3v6, 4v5; the 1 seed has a bye
+    season.playoffs = { format: 'nfl', seeds, rounds: [confs.flatMap((c) => pairUp(seeds[c].slice(1), `${c} Wild Card`))] };
+  } else {
+    const seeds = st.slice(0, playoffTeams(season)).map((r) => r.id);
+    season.playoffs = { format: 'bracket', seeds, rounds: [pairUp(seeds, seeds.length === 8 ? 'Quarterfinal' : 'Semifinal')] };
+  }
+}
+
+export function seedOf(season, id) {
+  const S = season.playoffs?.seeds;
+  if (!S) return null;
+  if (Array.isArray(S)) { const i = S.indexOf(id); return i < 0 ? null : i + 1; }
+  for (const c in S) { const i = S[c].indexOf(id); if (i >= 0) return i + 1; }
+  return null;
 }
 
 // ---------- leaders ----------
@@ -209,13 +318,14 @@ export function developPlayers(league, rng = new RNG(Date.now() % 1e9)) {
 
 // ---------- persistence ----------
 const KEY = 'gridiron-sim-season-v1';
-export function loadSeason() {
+export const seasonKey = (league) => (league?.source ? `${KEY}-${league.source}` : KEY);
+export function loadSeason(key = KEY) {
   try {
-    const raw = globalThis.localStorage?.getItem(KEY);
+    const raw = globalThis.localStorage?.getItem(key);
     if (!raw) return null;
     const s = JSON.parse(raw);
     return s && s.version === SEASON_VERSION ? s : null;
   } catch { return null; }
 }
-export function saveSeason(s) { try { globalThis.localStorage?.setItem(KEY, JSON.stringify(s)); return true; } catch { return false; } }
-export function clearSeason() { try { globalThis.localStorage?.removeItem(KEY); } catch { /* ignore */ } }
+export function saveSeason(s, key = KEY) { try { globalThis.localStorage?.setItem(key, JSON.stringify(s)); return true; } catch { return false; } }
+export function clearSeason(key = KEY) { try { globalThis.localStorage?.removeItem(key); } catch { /* ignore */ } }

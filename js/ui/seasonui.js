@@ -1,7 +1,7 @@
 // Season screen: standings, weekly slate (watch or sim), leaders, injuries, history.
 import {
   createSeason, currentGames, createSeasonGame, recordGame, standings, leaders, developPlayers,
-  LEADER_CATS, saveSeason, loadSeason, clearSeason,
+  LEADER_CATS, saveSeason, loadSeason, clearSeason, seasonKey, playoffTeams, seedOf,
 } from '../season/season.js';
 import { saveLeague } from '../data/storage.js';
 
@@ -11,7 +11,8 @@ export class SeasonUI {
   constructor(root, deps) {
     this.root = root;
     this.deps = deps; // { getLeague, watch(game, onDone), toast(msg) }
-    this.season = loadSeason();
+    this.key = seasonKey(deps.getLeague());
+    this.season = loadSeason(this.key);
     this.tab = 'overview';
     this.leaderSrc = 'season';
     this.busy = false;
@@ -24,13 +25,23 @@ export class SeasonUI {
     return t ? `<i class="swatch" style="background:${t.colors.primary}"></i> ${esc(t.abbr)}` : esc(id);
   }
 
+  save() { saveSeason(this.season, this.key); }
+
   render() {
+    // each league (fictional, NFL) keeps its own season
+    const lg = this.deps.getLeague();
+    const key = seasonKey(lg);
+    if (key !== this.key && !this.busy) { this.key = key; this.season = loadSeason(key); this.devNotes = null; }
+    if (this.season && this.season.teams.some((id) => !this.team(id))) this.season = null; // league was replaced
     const S = this.season;
     if (!S) {
-      this.root.innerHTML = `<p style="color:var(--muted)">Play a ${this.deps.getLeague().teams.length}-team season: a 14-week double round-robin, a 4-team playoff and a champion.
-        Injuries carry over from week to week, players develop between seasons, and season and career leaders are tracked.</p>
+      const nfl = lg.teams.length === 32 && lg.teams.every((t) => t.div);
+      this.root.innerHTML = `<p style="color:var(--muted)">${nfl
+        ? 'Play an NFL season: a 17-game schedule with two games against each division rival, a 14-team playoff (division winners seeded 1–4, three wild cards, byes for the 1 seeds) and a championship game.'
+        : `Play a ${lg.teams.length}-team season: a ${lg.teams.length <= 10 ? `${2 * (lg.teams.length - (lg.teams.length % 2 ? 0 : 1))}-week double round-robin` : '17-week schedule'}, a ${lg.teams.length > 8 ? 8 : 4}-team playoff and a champion.`}
+        Injuries carry over from week to week, players develop between seasons, and season and career leaders are tracked.${nfl ? ' A full NFL season takes several minutes to simulate.' : ''}</p>
         <div class="actions" style="justify-content:flex-start"><button class="primary" id="se-new">Start season</button></div>`;
-      this.root.querySelector('#se-new').onclick = () => { this.season = createSeason(this.deps.getLeague()); saveSeason(this.season); this.render(); };
+      this.root.querySelector('#se-new').onclick = () => { this.season = createSeason(lg); this.save(); this.render(); };
       return;
     }
     const tabs = [['overview', 'Standings & schedule'], ['leaders', 'Leaders'], ['injuries', 'Injuries'], ['history', 'History']];
@@ -53,19 +64,29 @@ export class SeasonUI {
     const S = this.season, lg = this.deps.getLeague();
     const rows = standings(S, lg);
     const games = currentGames(S);
-    const seedCut = 4;
-    const table = `<table class="stats"><tr><th>Team</th><th>W</th><th>L</th><th>T</th><th>PCT</th><th>PF</th><th>PA</th><th>DIFF</th><th>STRK</th></tr>
-      ${rows.map((r, i) => `<tr${i === seedCut - 1 ? ' class="cut"' : ''}><td>${i + 1}. ${this.chip(r.id)} ${esc(r.team.name)}</td><td>${r.w}</td><td>${r.l}</td><td>${r.t}</td><td>${r.pct.toFixed(3).replace(/^0/, '')}</td><td>${r.pf}</td><td>${r.pa}</td><td>${r.diff > 0 ? '+' : ''}${r.diff}</td><td>${r.streak}</td></tr>`).join('')}</table>
-      <div style="color:var(--muted);font-size:11.5px;margin-top:4px">Top 4 make the playoffs.</div>`;
+    const seedCut = playoffTeams(S);
+    const pct = (r) => r.pct.toFixed(3).replace(/^0/, '');
+    const seed = (id) => { const s = seedOf(S, id); return s ? ` <span style="color:var(--accent);font-size:11px">(${s})</span>` : ''; };
+    let table;
+    if (S.format === 'nfl') {
+      table = [...new Set(S.divisions.map((d) => d.conf))].map((c) => `<h3 class="se-h3">${esc(c)}</h3>${S.divisions.filter((d) => d.conf === c).map((d) =>
+        `<table class="stats" style="margin-bottom:6px"><tr><th>${esc(d.name)}</th><th>W</th><th>L</th><th>T</th><th>PCT</th><th>DIV</th><th>PF</th><th>PA</th><th>STRK</th></tr>
+        ${rows.filter((r) => r.div === d.name).map((r) => `<tr><td>${this.chip(r.id)} ${esc(r.team.name)}${seed(r.id)}</td><td>${r.w}</td><td>${r.l}</td><td>${r.t}</td><td>${pct(r)}</td><td>${r.dw}-${r.dl}${r.dt ? `-${r.dt}` : ''}</td><td>${r.pf}</td><td>${r.pa}</td><td>${r.streak}</td></tr>`).join('')}</table>`).join('')}`).join('')
+        + '<div style="color:var(--muted);font-size:11.5px;margin-top:4px">Seven teams per conference make the playoffs: four division winners and three wild cards.</div>';
+    } else {
+      table = `<table class="stats"><tr><th>Team</th><th>W</th><th>L</th><th>T</th><th>PCT</th><th>PF</th><th>PA</th><th>DIFF</th><th>STRK</th></tr>
+      ${rows.map((r, i) => `<tr${i === seedCut - 1 ? ' class="cut"' : ''}><td>${i + 1}. ${this.chip(r.id)} ${esc(r.team.name)}</td><td>${r.w}</td><td>${r.l}</td><td>${r.t}</td><td>${pct(r)}</td><td>${r.pf}</td><td>${r.pa}</td><td>${r.diff > 0 ? '+' : ''}${r.diff}</td><td>${r.streak}</td></tr>`).join('')}</table>
+      <div style="color:var(--muted);font-size:11.5px;margin-top:4px">Top ${seedCut} make the playoffs.</div>`;
+    }
     let slate = '';
     if (S.phase === 'done') {
       slate = `<div class="se-champ">🏆 ${this.chip(S.champion)} ${esc(this.team(S.champion).city)} ${esc(this.team(S.champion).name)} are Season ${S.year} champions!</div>
         ${this.devNotes ? `<div class="box-sec"><h3>Offseason development</h3><div class="snaps">${this.devNotes.slice(0, 18).map((c) => `<div><span>${esc(c.name)} <span class="pos">${c.team} ${c.pos}</span></span><b style="color:${c.to > c.from ? 'var(--good)' : 'var(--bad)'}">${c.from}→${c.to}</b></div>`).join('')}</div></div>` : ''}
         <div class="actions" style="justify-content:flex-start"><button class="primary" id="se-next">Start Season ${S.year + 1}</button><button id="se-reset">Delete season</button></div>`;
     } else {
-      const label = S.phase === 'playoffs' ? S.playoffs.rounds[S.playoffs.rounds.length - 1][0].playoff : `Week ${S.week + 1}`;
+      const label = S.phase === 'playoffs' ? S.playoffs.rounds[S.playoffs.rounds.length - 1][0].playoff.replace(/^[A-Z]{3} (?=Wild|Div|Champ)/, '') : `Week ${S.week + 1}`;
       slate = `<h3 class="se-h3">${label}</h3>
-        <div class="se-games">${games.map((g, i) => `<div class="se-game"><span>${this.chip(g.away)} @ ${this.chip(g.home)}</span>
+        <div class="se-games">${games.map((g, i) => `<div class="se-game"><span>${this.chip(g.away)}${seed(g.away)} @ ${this.chip(g.home)}${seed(g.home)}${g.playoff && /^[A-Z]{3} /.test(g.playoff) ? ` <span style="color:var(--muted)">${esc(g.playoff.slice(0, 3))}</span>` : ''}</span>
           <span><button data-watch="${i}">Watch</button> <button data-sim="${i}">Sim</button></span></div>`).join('')}</div>
         ${this.lastResults()}
         <div class="actions" style="justify-content:flex-start">
@@ -82,8 +103,8 @@ export class SeasonUI {
     q('#se-simweek') && (q('#se-simweek').onclick = () => this.simGames(currentGames(this.season)));
     q('#se-simreg') && (q('#se-simreg').onclick = () => this.simUntil(() => this.season.phase !== 'regular'));
     q('#se-simall') && (q('#se-simall').onclick = () => this.simUntil(() => this.season.phase === 'done'));
-    q('#se-next') && (q('#se-next').onclick = () => { this.season = createSeason(lg, this.season); this.devNotes = null; saveSeason(this.season); this.render(); });
-    q('#se-reset') && (q('#se-reset').onclick = () => { if (confirm('Delete this season (including history and career stats)?')) { clearSeason(); this.season = null; this.render(); } });
+    q('#se-next') && (q('#se-next').onclick = () => { this.season = createSeason(lg, this.season); this.devNotes = null; this.save(); this.render(); });
+    q('#se-reset') && (q('#se-reset').onclick = () => { if (confirm('Delete this season (including history and career stats)?')) { clearSeason(this.key); this.season = null; this.render(); } });
   }
 
   lastResults() {
@@ -143,7 +164,7 @@ export class SeasonUI {
       saveLeague(lg);
       this.deps.toast(`${this.team(S.champion).name} win Season ${S.year}!`);
     }
-    saveSeason(S);
+    this.save();
   }
 
   // Simulate games without blocking the page: play-by-play chunks with progress.

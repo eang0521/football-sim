@@ -1,17 +1,20 @@
 // Headless harness: simulate many games and print league-wide averages.
 // Usage: node tools/headless.mjs [games] [--pbp]
+import fs from 'node:fs';
 import { generateLeague } from '../js/data/teamgen.js';
 import { Game } from '../js/sim/game.js';
 
 const N = parseInt(process.argv[2] || '20', 10);
 const PBP = process.argv.includes('--pbp');
-const league = generateLeague(777);
+const LG = process.argv.indexOf('--league'); // e.g. --league private/nfl-league.json
+const league = LG > 0 ? JSON.parse(fs.readFileSync(process.argv[LG + 1], 'utf8')) : generateLeague(777);
+const NT = league.teams.length;
 const agg = { games: 0, pts: 0, plays: 0, passAtt: 0, passCmp: 0, passYds: 0, rushAtt: 0, rushYds: 0, sacks: 0,
   ints: 0, fum: 0, punts: 0, fga: 0, fgm: 0, tds: 0, firstDowns: 0, thirdAtt: 0, thirdConv: 0, ot: 0, ties: 0, maxPts: 0, top: 0, pen: 0, penYds: 0, inj: 0, injOut: 0 };
 const foulTypes = {};
 const t0 = Date.now();
 for (let g = 0; g < N; g++) {
-  const h = league.teams[g % 8], a = league.teams[(g + 3) % 8];
+  const h = league.teams[g % NT], a = league.teams[(g + 3) % NT];
   const game = new Game(h, a, { seed: 1000 + g });
   game.simToEnd();
   const s = game.s;

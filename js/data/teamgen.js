@@ -137,10 +137,12 @@ export function generateLeague(seed = 12345) {
   return { version: 1, seed, teams: FRANCHISES.map((fr, i) => generateTeam(rng, fr, i, rng.normal(0, 2))) };
 }
 
-// Depth chart: best players by OVR at each position.
+// Depth chart: best players by OVR at each position. Imported players carry an
+// offset (madden.adj) so the order follows their source ratings.
+export const depthScore = (p) => p.ovr + (p.madden?.adj || 0);
 export function depthChart(team) {
   const d = {};
-  for (const pos of POSITIONS) d[pos] = team.roster.filter((p) => p.pos === pos).sort((a, b) => b.ovr - a.ovr);
+  for (const pos of POSITIONS) d[pos] = team.roster.filter((p) => p.pos === pos).sort((a, b) => depthScore(b) - depthScore(a));
   return d;
 }
 

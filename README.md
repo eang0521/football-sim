@@ -111,6 +111,21 @@ tools/               Node harnesses for tuning realism
 - `tools/snapdiag.mjs`: snap shares by depth-chart slot (rotation check)
 - `tools/seasondiag.mjs`: simulates a full season
 
+## Real NFL league (private)
+
+`tools/import-nfl.mjs` builds a league of the 32 real NFL teams for your own use:
+
+```bash
+node tools/import-nfl.mjs
+```
+
+- **Rosters and ratings** come from the current Madden NFL ratings on ea.com (positions, jersey numbers, height and weight, and the full rating set). Madden ratings are mapped onto the sim's rating keys and then calibrated per position to the scale the sim was tuned on, so real rosters produce NFL-like box scores. The depth chart keeps Madden's order, and traits are derived from the underlying ratings (for example, a QB with elite speed becomes a Scrambler).
+- **Last season's stats** (passing, rushing, receiving, defense, kicking, punting) come from ESPN, and appear in a stats column in the team editor.
+- **Coaches** are the current head coaches. Their pass rate, 4th-down aggression, deep-shot rate and tempo come from last season's team stats.
+- **Season mode** switches to the NFL format for this league: 17 games with each division rival twice, 7 playoff teams per conference with a bye for each 1 seed, and a championship game. The NFL league and the fictional league each keep their own saved season.
+
+The output goes to `private/nfl-league.json`, which is gitignored, so it is never committed or deployed to GitHub Pages. When the site runs locally, **Teams → Load NFL league** loads it; anywhere else, use **Import league JSON**. Downloads are cached in `private/cache/`; pass `--refresh` to fetch fresh ratings, and `--stats-season YYYY` to choose the stats season. Check the league against NFL norms with `node tools/headless.mjs 24 --league private/nfl-league.json`.
+
 ## Customizing
 
 - **Teams and players:** use the in-app editor, or export, edit, and import the league as JSON.
