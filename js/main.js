@@ -5,6 +5,7 @@ import { teamRatings } from './data/teamgen.js';
 import { Hud, renderBoxScore, readable, shade } from './ui/hud.js';
 import { TeamEditor } from './ui/editor.js';
 import { SeasonUI } from './ui/seasonui.js';
+import { DraftUI } from './ui/draftui.js';
 import { DT } from './sim/constants.js';
 import { ReplaySim } from './sim/replay.js';
 
@@ -117,18 +118,22 @@ function nextPlay() {
   beginNextPlay();
 }
 
-async function bulkSim(untilQuarterEnd) {
+// mode: 'quarter' (end of this quarter), 'late' (5:00 left in the 4th), or 'game'
+async function bulkSim(mode) {
   const g = S.game;
   if (!g || S.bulk || g.s.final) return;
+  const untilQuarterEnd = mode === 'quarter';
+  const late = () => mode === 'late' && g.s.quarter >= 4 && g.s.clock <= 300;
+  if (late()) { hud.toast('Already inside the last five minutes.'); return; }
   if (S.sim && !S.sim.applied) { S.sim.runToEnd(); finishPlay(S.sim); }
   S.sim = null; S.waiting = false;
   S.bulk = true;
   setBusy(true);
   const q0 = g.s.quarter;
   hud.hideBanner();
-  while (!g.s.final && !(untilQuarterEnd && g.s.quarter !== q0)) {
+  while (!g.s.final && !(untilQuarterEnd && g.s.quarter !== q0) && !late()) {
     const t0 = performance.now();
-    while (performance.now() - t0 < 14 && !g.s.final && !(untilQuarterEnd && g.s.quarter !== q0)) {
+    while (performance.now() - t0 < 14 && !g.s.final && !(untilQuarterEnd && g.s.quarter !== q0) && !late()) {
       const sim = g.nextSim({ skipLineup: true });
       if (!sim) break;
       sim.runToEnd();
@@ -143,6 +148,7 @@ async function bulkSim(untilQuarterEnd) {
   hud.showWP(g);
   hud.update(); hud.syncLog();
   if (g.s.final) onGameOver();
+  else if (mode === 'late') hud.toast(`${Math.floor(g.s.clock / 60)}:${String(Math.floor(g.s.clock % 60)).padStart(2, '0')} left in the 4th — watching the finish live`);
   else hud.toast(`${untilQuarterEnd ? 'Quarter' : 'Game'} simulated — resuming live play`);
 }
 
@@ -157,7 +163,7 @@ function onGameOver() {
 }
 
 function setBusy(b) {
-  for (const id of ['btn-next', 'btn-simq', 'btn-simg', 'btn-play']) $(id).disabled = b;
+  for (const id of ['btn-next', 'btn-simq', 'btn-sim5', 'btn-simg', 'btn-play']) $(id).disabled = b;
 }
 
 function setPaused(p) {
@@ -229,8 +235,9 @@ $('btn-hl').addEventListener('click', () => {
 $('btn-play').addEventListener('click', () => setPaused(!S.paused));
 $('speed').addEventListener('change', (e) => { S.speed = +e.target.value; });
 $('btn-next').addEventListener('click', nextPlay);
-$('btn-simq').addEventListener('click', () => bulkSim(true));
-$('btn-simg').addEventListener('click', () => bulkSim(false));
+$('btn-simq').addEventListener('click', () => bulkSim('quarter'));
+$('btn-sim5').addEventListener('click', () => bulkSim('late'));
+$('btn-simg').addEventListener('click', () => bulkSim('game'));
 $('tog-art').addEventListener('change', (e) => { renderer.showArt = e.target.checked; if (S.sim) renderer.buildArt(S.sim); });
 $('tog-names').addEventListener('change', (e) => { renderer.showNames = e.target.checked; });
 $('tog-auto').addEventListener('change', (e) => { S.auto = e.target.checked; if (S.auto && S.waiting) nextPlay(); });
@@ -275,6 +282,21 @@ const seasonUI = new SeasonUI($('season-body'), {
   },
 });
 $('btn-season').addEventListener('click', () => { seasonUI.render(); openModal('modal-season'); });
+const draftUI = new DraftUI($('draft-body'), {
+  getLeague: () => league,
+  toast: (m) => hud.toast(m, 4000),
+  // the drafted league becomes the current league, and its season starts right away
+  startSeason: (lg) => {
+    league = lg;
+    if (!saveLeague(league)) hud.toast('Browser storage is full; the drafted league lasts until you reload.', 5000);
+    fillTeamSelects();
+    seasonUI.startSeasonFor(league);
+    closeModal('modal-draft');
+    seasonUI.render();
+    openModal('modal-season');
+  },
+});
+$('btn-draft').addEventListener('click', () => { draftUI.render(); openModal('modal-draft'); });
 $('btn-new').addEventListener('click', () => { fillTeamSelects(); openModal('modal-new'); });
 $('ng-cancel').addEventListener('click', () => { if (S.game) closeModal('modal-new'); });
 

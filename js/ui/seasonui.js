@@ -30,10 +30,19 @@ export class SeasonUI {
   team(id) { return this.deps.getLeague().teams.find((t) => t.id === id); }
   chip(id) {
     const t = this.team(id);
-    return t ? `<i class="swatch" style="background:${t.colors.primary}"></i> ${esc(t.abbr)}` : esc(id);
+    const mine = id === this.deps.getLeague().userTeam; // fantasy draft: the user's franchise
+    return t ? `<i class="swatch" style="background:${t.colors.primary}"></i> ${mine ? `<b class="my-team" title="Your team">★${esc(t.abbr)}</b>` : esc(t.abbr)}` : esc(id);
   }
 
   save() { saveSeason(this.season, this.key); }
+
+  // Start a fresh season for a league (the fantasy draft hands its league over here).
+  startSeasonFor(lg) {
+    this.key = seasonKey(lg);
+    this.season = createSeason(lg);
+    this.devNotes = null; this.playerId = null; this.tab = 'overview';
+    this.save();
+  }
 
   render() {
     // each league (fictional, NFL) keeps its own season
@@ -88,7 +97,9 @@ export class SeasonUI {
   renderOverview(body) {
     const S = this.season, lg = this.deps.getLeague();
     const rows = standings(S, lg);
-    const games = currentGames(S);
+    const me = lg.userTeam;
+    const isMine = (g) => !!me && (g.home === me || g.away === me);
+    const games = currentGames(S).sort((a, b) => isMine(b) - isMine(a)); // your game first
     const seedCut = playoffTeams(S);
     const pct = (r) => r.pct.toFixed(3).replace(/^0/, '');
     const seed = (id) => { const s = seedOf(S, id); return s ? ` <span style="color:var(--accent);font-size:11px">(${s})</span>` : ''; };
@@ -113,10 +124,11 @@ export class SeasonUI {
       const playing = new Set(games.flatMap((g) => [g.home, g.away]).concat((S.weeks[S.week]?.games || []).flatMap((g) => [g.home, g.away])));
       const byes = S.phase === 'regular' ? S.teams.filter((id) => !playing.has(id)) : [];
       slate = `<h3 class="se-h3">${label}</h3>${byes.length ? `<div style="color:var(--muted);font-size:12px;margin:-2px 0 6px">Bye: ${byes.map((id) => this.chip(id)).join(' ')}</div>` : ''}
-        <div class="se-games">${games.map((g, i) => `<div class="se-game"><span>${this.chip(g.away)}${seed(g.away)} @ ${this.chip(g.home)}${seed(g.home)}${g.playoff && /^[A-Z]{3} /.test(g.playoff) ? ` <span style="color:var(--muted)">${esc(g.playoff.slice(0, 3))}</span>` : ''}</span>
+        <div class="se-games">${games.map((g, i) => `<div class="se-game${isMine(g) ? ' mine' : ''}"><span>${isMine(g) ? '<span class="my-label">Your game</span> ' : ''}${this.chip(g.away)}${seed(g.away)} @ ${this.chip(g.home)}${seed(g.home)}${g.playoff && /^[A-Z]{3} /.test(g.playoff) ? ` <span style="color:var(--muted)">${esc(g.playoff.slice(0, 3))}</span>` : ''}</span>
           <span><button data-watch="${i}">Watch</button> <button data-sim="${i}">Sim</button></span></div>`).join('')}</div>
         ${this.lastResults()}
         <div class="actions" style="justify-content:flex-start">
+          ${games.some(isMine) && games.length > 1 ? '<button id="se-simothers" title="Simulate every game except yours, then watch yours">Sim other games</button>' : ''}
           <button id="se-simweek" class="primary">Sim ${S.phase === 'playoffs' ? 'round' : 'week'}</button>
           ${S.phase === 'regular' ? '<button id="se-simreg">Sim to playoffs</button>' : ''}
           <button id="se-simall">Sim rest of season</button>
@@ -128,6 +140,7 @@ export class SeasonUI {
     body.querySelectorAll('[data-watch]').forEach((b) => { b.onclick = () => this.watch(games[+b.dataset.watch]); });
     body.querySelectorAll('[data-sim]').forEach((b) => { b.onclick = () => this.simGames([games[+b.dataset.sim]]); });
     q('#se-simweek') && (q('#se-simweek').onclick = () => this.simGames(currentGames(this.season)));
+    q('#se-simothers') && (q('#se-simothers').onclick = () => this.simGames(currentGames(this.season).filter((g) => !isMine(g))));
     q('#se-simreg') && (q('#se-simreg').onclick = () => this.simUntil(() => this.season.phase !== 'regular'));
     q('#se-simall') && (q('#se-simall').onclick = () => this.simUntil(() => this.season.phase === 'done'));
     q('#se-next') && (q('#se-next').onclick = () => { this.season = createSeason(lg, this.season); this.devNotes = null; this.save(); this.render(); });
