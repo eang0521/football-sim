@@ -70,7 +70,7 @@ Phase 1, then 5, 4, 6, 7, 8, then 10, 11, 12, then 13, 15, 16, 14, 9, then 17 an
 # Round 2: 19 improvements
 
 Round 2 follows the same rules as round 1. Every sim change is checked in two ways:
-- the 48-game headless check on both leagues (`tools/headless.mjs 48`, with and without `--league private/nfl-league.json`);
+- the 48-game headless check on both leagues (`tools/headless.mjs 48`, with and without `--league nfl/nfl-league.json`);
 - a full NFL season (`tools/nflseason.mjs`) compared with NFL leader and distribution norms.
 
 Status key: ☐ not started · ◐ in progress · ☑ done

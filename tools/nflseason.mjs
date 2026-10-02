@@ -24,7 +24,7 @@ if (!isMainThread) {
   const { createSeason, currentGames, recordGame, standings, outPlayers } = await import('../js/season/season.js');
   const args = process.argv.slice(2);
   const opt = (k, d) => { const i = args.indexOf(k); return i >= 0 ? args[i + 1] : d; };
-  const file = args[0] && !args[0].startsWith('--') ? args[0] : 'private/nfl-league.json';
+  const file = args[0] && !args[0].startsWith('--') ? args[0] : 'nfl/nfl-league.json';
   const WEEKS = +opt('--weeks', 99);
   const NW = +opt('--workers', Math.max(1, os.availableParallelism() - 1));
   const lg = JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -131,7 +131,7 @@ if (!isMainThread) {
   console.log('Standings:', st.map((r) => `${r.id} ${r.w}-${r.l}${r.t ? '-' + r.t : ''}`).join(', '));
   if (season.playoffs) for (const round of season.playoffs.rounds) console.log(round.map((g) => g.result ? `${g.playoff}: ${g.away} ${g.result.awayScore} @ ${g.home} ${g.result.homeScore}` : '').join(' | '));
   if (season.champion) console.log('Champion:', season.champion);
-  fs.mkdirSync('private/cache', { recursive: true });
-  fs.writeFileSync('private/cache/season-dump.json', JSON.stringify({ players: P, teams: teamTot }));
-  console.log(`\n${((Date.now() - t0) / 1000).toFixed(0)}s total; player lines saved to private/cache/season-dump.json`);
+  fs.mkdirSync('nfl/cache', { recursive: true });
+  fs.writeFileSync('nfl/cache/season-dump.json', JSON.stringify({ players: P, teams: teamTot }));
+  console.log(`\n${((Date.now() - t0) / 1000).toFixed(0)}s total; player lines saved to nfl/cache/season-dump.json`);
 }

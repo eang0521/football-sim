@@ -6,7 +6,7 @@ import { Game } from '../js/sim/game.js';
 
 const N = parseInt(process.argv[2] || '20', 10);
 const PBP = process.argv.includes('--pbp');
-const LG = process.argv.indexOf('--league'); // e.g. --league private/nfl-league.json
+const LG = process.argv.indexOf('--league'); // e.g. --league nfl/nfl-league.json
 const league = LG > 0 ? JSON.parse(fs.readFileSync(process.argv[LG + 1], 'utf8')) : generateLeague(777);
 const NT = league.teams.length;
 const agg = { games: 0, pts: 0, plays: 0, passAtt: 0, passCmp: 0, passYds: 0, rushAtt: 0, rushYds: 0, sacks: 0,

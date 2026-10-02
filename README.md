@@ -118,7 +118,7 @@ tools/               Node harnesses for tuning realism
 - `tools/seasondiag.mjs`: simulates a full season
 - `tools/nflseason.mjs [league.json]`: simulates a full season in parallel worker threads (about 2 minutes for the NFL league) and compares stat leaders, 1,000-yard and 10-sack counts, and sack and TFL distributions by position with NFL norms
 
-## Real NFL league (private)
+## Real NFL league
 
 `tools/import-nfl.mjs` builds a league of the 32 real NFL teams for your own use:
 
@@ -133,7 +133,7 @@ node tools/import-nfl.mjs
 - **Season mode** switches to the NFL format for this league: 17 games with each division rival twice, 7 playoff teams per conference with a bye for each 1 seed, and a championship game. It can use the **real schedule** (with byes), start at the current week with the **real results so far**, and carry over current injuries. The NFL league and the fictional league each keep their own saved season.
 - Live data (ratings, rosters, injuries, depth charts, schedule) is cached per day, so running the importer again on a later day refreshes it.
 
-The output goes to `private/nfl-league.json`, which is gitignored, so it is never committed or deployed to GitHub Pages. When the site runs locally, **Teams → Load NFL league** loads it; anywhere else, use **Import league JSON**. Downloads are cached in `private/cache/`; pass `--refresh` to fetch fresh ratings, and `--stats-season YYYY` to choose the stats season. Check the league against NFL norms with `node tools/headless.mjs 24 --league private/nfl-league.json`.
+The output goes to `nfl/nfl-league.json`, which is committed, so **Teams → Load NFL league** works locally and on GitHub Pages. Raw downloads are cached in `nfl/cache/` (gitignored); pass `--refresh` to fetch fresh ratings, and `--stats-season YYYY` to choose the stats season. Check the league against NFL norms with `node tools/headless.mjs 24 --league nfl/nfl-league.json`.
 
 ## Customizing
 

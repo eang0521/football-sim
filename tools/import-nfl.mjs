@@ -1,19 +1,19 @@
-// Build a private NFL league file from public sources:
+// Build an NFL league file from public sources:
 //   - Madden NFL ratings (ea.com ratings pages): rosters, positions, jerseys, size, ratings
 //   - ESPN APIs: team names/colors, head coaches, last season's player and team stats,
 //     current rosters and injuries, depth charts (incl. returners) and this season's schedule/results
 // Usage: node tools/import-nfl.mjs [--stats-season 2025] [--refresh]
 // Live data (ratings, rosters, injuries, depth charts, schedule) is cached per day, so running this
 // again on a later day picks up the latest; --refresh re-downloads everything.
-// Output: private/nfl-league.json (gitignored). Import it from Teams → Import league JSON,
-// or use "Load NFL league" when running the site locally. Nothing here is committed or deployed.
+// Output: nfl/nfl-league.json (committed, so "Load NFL league" works on the public site too).
+// The raw download cache in nfl/cache/ is gitignored.
 import fs from 'node:fs';
 import path from 'node:path';
 import { computeOvr, RATING_KEYS, generateLeague, depthChart } from '../js/data/teamgen.js';
 import { TRAITS } from '../js/data/traits.js';
 
 const ROOT = path.resolve(path.dirname(new URL(import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1')), '..');
-const OUT_DIR = path.join(ROOT, 'private');
+const OUT_DIR = path.join(ROOT, 'nfl');
 const CACHE = path.join(OUT_DIR, 'cache');
 fs.mkdirSync(CACHE, { recursive: true });
 

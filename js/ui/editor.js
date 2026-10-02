@@ -32,7 +32,7 @@ function realSummary(p) {
   return `${r.gp} GP${parts.length ? ' · ' + parts.join(' · ') : ''}`;
 }
 
-const NFL_FILE = 'private/nfl-league.json';
+const NFL_FILE = 'nfl/nfl-league.json';
 
 export class TeamEditor {
   constructor(root, getLeague, setLeague, onChange) {
@@ -42,7 +42,7 @@ export class TeamEditor {
     this.onChange = onChange;
     this.sel = 0;
     this.posFilter = 'ALL';
-    // The NFL league file only exists where tools/import-nfl.mjs was run (never on the public site).
+    // The NFL league file is committed under nfl/ (built by tools/import-nfl.mjs).
     this.nflAvailable = false;
     fetch(NFL_FILE, { method: 'HEAD', cache: 'no-store' })
       .then((r) => { this.nflAvailable = r.ok; if (r.ok && this.root.innerHTML) this.render(); })
@@ -66,7 +66,7 @@ export class TeamEditor {
           ${lg.teams.map((tm, i) => `<button data-team="${i}" class="${i === this.sel ? 'on' : ''}"><i class="swatch" style="background:${tm.colors.primary}"></i>${esc(tm.abbr)} ${esc(tm.name)}</button>`).join('')}
           <div class="ed-actions" style="flex-direction:column">
             <button id="ed-regen">Regenerate this team</button>
-            ${this.nflAvailable ? '<button id="ed-nfl" title="Load private/nfl-league.json, built by tools/import-nfl.mjs">Load NFL league</button>' : ''}
+            ${this.nflAvailable ? '<button id="ed-nfl" title="Load nfl/nfl-league.json, built by tools/import-nfl.mjs">Load NFL league</button>' : ''}
             <button id="ed-export">Export league JSON</button>
             <label class="tog" style="justify-content:center"><input type="file" id="ed-import" accept="application/json" style="display:none" /><span class="fakebtn" style="padding:7px 11px;border:1px solid rgba(255,255,255,.1);border-radius:7px;background:#1b2638;color:var(--text);font-weight:600;cursor:pointer">Import league JSON</span></label>
             <button id="ed-reset" style="color:var(--bad)">Reset entire league</button>
