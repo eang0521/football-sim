@@ -148,10 +148,24 @@ export function depthChart(team) {
   return d;
 }
 
+// Team ratings: starters weighted by how much each slot matters (QB most of all, then the top
+// pass rusher, cover corner and receiver), with extra credit for stars and a penalty for weak
+// starters. The weighted score is then stretched around TEAM_ANCHOR so real differences show up.
+const OFF_SLOTS = { QB: [4], RB: [0.8], WR: [1.4, 1.1, 0.7], TE: [0.8], OL: [1, 0.9, 0.9, 0.8, 0.8] };
+const DEF_SLOTS = { DE: [1.6, 1.3], DT: [1.1, 0.9], LB: [1, 0.8, 0.5], CB: [1.5, 1.2, 0.8], S: [1, 0.8] };
+const TEAM_ANCHOR = 76, TEAM_STRETCH = 3;
+const slotValue = (o) => o + 0.6 * Math.max(0, o - 82) - 0.6 * Math.max(0, 66 - o);
+function unitScore(d, slots) {
+  let s = 0, t = 0;
+  for (const [pos, ws] of Object.entries(slots)) {
+    const ovrs = (d[pos] || []).slice(0, ws.length).map((p) => p.ovr).sort((a, b) => b - a);
+    ws.forEach((w, i) => { s += w * slotValue(ovrs[i] ?? 40); t += w; });
+  }
+  return s / t;
+}
 export function teamRatings(team) {
   const d = depthChart(team);
-  const avg = (arr) => Math.round(arr.reduce((s, p) => s + p.ovr, 0) / Math.max(1, arr.length));
-  const off = avg([d.QB[0], d.QB[0], d.RB[0], ...d.WR.slice(0, 3), d.TE[0], ...d.OL.slice(0, 5)]);
-  const def = avg([...d.DE.slice(0, 2), ...d.DT.slice(0, 2), ...d.LB.slice(0, 3), ...d.CB.slice(0, 3), ...d.S.slice(0, 2)]);
-  return { off, def, ovr: Math.round((off + def) / 2) };
+  const scale = (raw) => Math.max(40, Math.min(99, Math.round(TEAM_ANCHOR + (raw - TEAM_ANCHOR) * TEAM_STRETCH)));
+  const offRaw = unitScore(d, OFF_SLOTS), defRaw = unitScore(d, DEF_SLOTS);
+  return { off: scale(offRaw), def: scale(defRaw), ovr: scale((offRaw + defRaw) / 2), offRaw, defRaw };
 }

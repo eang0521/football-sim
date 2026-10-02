@@ -42,7 +42,7 @@ export class Game {
     this.snaps = new Map();    // pid -> snaps played on offense/defense
     for (const t of [home, away]) for (const p of t.roster) this.energy.set(p.id, 1);
     this.momentum = 0;         // -1 (away) .. +1 (home)
-    this.weather = makeWeather(opts.weather || 'random', this.rng);
+    this.weather = makeWeather(opts.weather || 'random', this.rng, { home: this.teams.home, date: opts.date ? new Date(opts.date) : new Date() });
     const blankT = () => ({ run: { n: 0, s: 0 }, pass: { n: 0, s: 0 }, concept: {}, form: {} });
     this.tend = { home: blankT(), away: blankT() };  // in-game success by play type / concept
     this.challenges = { home: 2, away: 2 };
@@ -243,7 +243,7 @@ export class Game {
     const diff = s.score[off] - s.score[def];
     const secs = Math.max(0, this.secsLeft() - 6);
     const tr = (k) => teamRatings(this.teams[k]);
-    const edge = clamp((tr(off).off - tr(def).def) * 0.008, -0.08, 0.08);
+    const edge = clamp((tr(off).offRaw - tr(def).defRaw) * 0.008, -0.08, 0.08);
     const pConv = clamp(conversionProb(s.toGo, s.ballOn) + edge, 0.1, 0.85);
     const goal = s.ballOn + s.toGo >= 100;
     const wpSucc = goal ? this.wpAfterPossessionChange(off, diff + 7, 30, secs)

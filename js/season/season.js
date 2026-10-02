@@ -1,5 +1,6 @@
 // Season mode: schedule, standings, playoffs, season/career stats, injuries and history.
 // Pure data + logic (no DOM) so it can be exercised from Node.
+import { seasonDate } from '../sim/climate.js';
 import { RNG } from '../util/rng.js';
 import { Game } from '../sim/game.js';
 import { computeOvr } from '../data/teamgen.js';
@@ -190,7 +191,10 @@ export function outPlayers(season) {
 
 export function createSeasonGame(season, league, g, opts = {}) {
   const home = league.teams.find((t) => t.id === g.home), away = league.teams.find((t) => t.id === g.away);
-  return new Game(home, away, { ...opts, out: outPlayers(season), noTie: !!g.playoff });
+  // game date for the weather: the real schedule's date, or an estimate from the week / playoff round
+  const wk = season.phase === 'playoffs' ? season.weeks.length + (season.playoffs?.rounds.length || 1) - 1 : season.week;
+  const date = g.date || seasonDate(wk);
+  return new Game(home, away, { date, ...opts, out: outPlayers(season), noTie: !!g.playoff });
 }
 
 // Record a finished game: result, stats, injuries. Advances weeks/rounds as they complete.
