@@ -188,7 +188,7 @@ export function predictRoutePos(r, T) {
     x += vx * dt; y += vy * dt;
     t += dt;
   }
-  return { x, y: clamp(y, 0.8, FIELD_W - 0.8) };
+  return { x: Math.min(x, ROUTE_BACK), y: clamp(y, ROUTE_EDGE, FIELD_W - ROUTE_EDGE) };
 }
 
 function throwSpeed(qb, d, lob) {
@@ -549,7 +549,27 @@ function qbRun(sim, qb) {
 function predictLinear(a, T) { return { x: a.x + a.vx * T, y: a.y + a.vy * T }; }
 
 // ---------------- Offensive skill players ----------------
+// Receivers keep their feet in: never aim past the sideline / end-line margins, and start
+// braking early enough that momentum doesn't carry them out.
+export const ROUTE_EDGE = 1.2, ROUTE_BACK = 108.6;
+function stayInbounds(a, edge = ROUTE_EDGE, back = ROUTE_BACK) {
+  const w = a.want;
+  if (!w) return;
+  const lo = edge, hi = FIELD_W - edge;
+  if (w.x > back) { w.x = back; w.arrive = true; }
+  w.y = clamp(w.y, lo, hi);
+  const brake = 2 * a.acc * 1.1, pad = 0.25;
+  if (a.vy < 0 && (a.vy * a.vy) / brake > a.y - lo - pad) w.y = Math.max(w.y, a.y);
+  if (a.vy > 0 && (a.vy * a.vy) / brake > hi - a.y - pad) w.y = Math.min(w.y, a.y);
+  if (a.vx > 0 && (a.vx * a.vx) / brake > back - a.x - pad) w.x = Math.min(w.x, a.x);
+}
+
 function routeThink(sim, a) {
+  routeMove(sim, a);
+  if (sim.t >= (a.d.route?.delay ?? 0) && !a.engaged) stayInbounds(a);
+}
+
+function routeMove(sim, a) {
   const R = a.d.route;
   if (!R) return;
   if (sim.t >= R.delay && a.engaged) { sim.release(a); a.d.blockOn = null; }
@@ -572,7 +592,12 @@ function routeThink(sim, a) {
     }
     const last = R.pts[R.pts.length - 1], prev = R.pts[R.pts.length - 2] || { x: a.x - 1, y: a.y };
     const u = norm(last.x - prev.x, last.y - prev.y);
-    goTo(a, a.x + u.x * 10, clamp(a.y + u.y * 10, 1, FIELD_W - 1), a.maxSpd, false);
+    let tx = a.x + u.x * 10, ty = a.y + u.y * 10;
+    // pinned against the sideline: turn upfield along it instead of drifting out
+    if (ty < ROUTE_EDGE || ty > FIELD_W - ROUTE_EDGE) { ty = clamp(ty, ROUTE_EDGE, FIELD_W - ROUTE_EDGE); tx = Math.max(tx, a.x + 8); }
+    // out of room at the back of the end zone: settle there and come back to the ball
+    if (tx > ROUTE_BACK) { goTo(a, ROUTE_BACK, ty, a.maxSpd, true); a.faceTo = sim.qb() || null; return; }
+    goTo(a, tx, ty, a.maxSpd, false);
     return;
   }
   const p = R.pts[R.idx];
@@ -891,11 +916,13 @@ function ballReact(sim, a) {
       if (Math.hypot(bx - a.x, by - a.y) <= reach) { aim = { x: bx, y: by }; break; }
     }
     goTo(a, aim.x, aim.y, a.maxSpd, false);
+    // reach for it, but keep the feet in: a ball sailing out of bounds is let go
+    stayInbounds(a, 0.45, 109.5);
     return;
   }
   if (a.side === 'O') {
     // other receivers: continue a bit then drift toward the ball to block
-    if (a.role === 'route') { goTo(a, a.x + a.vx * 0.3, a.y + a.vy * 0.3, 4); return; }
+    if (a.role === 'route') { goTo(a, a.x + a.vx * 0.3, a.y + a.vy * 0.3, 4); stayInbounds(a); return; }
     return;
   }
   // Defender

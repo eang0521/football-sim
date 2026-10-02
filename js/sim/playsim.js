@@ -717,6 +717,8 @@ export class PlaySim {
     if (!c || c.down) return;
     const pocketQB = c.role === 'qb' && !c.d.runner;
     if (c === this.snapper && !c.d.runner) return;
+    // a punter/holder with the ball is live too: out the back of the end zone (or the side) is dead
+    if (this.kind !== 'scrimmage' && c.side === 'O' && c === this.st.kicker && (c.x < -10 || c.y < 0 || c.y > FIELD_W)) return this.whistle('oob', c.x);
     if (this.kind !== 'scrimmage' && !c.d.runner) return;
     const opp = c.side === 'O' ? this.def : this.off;
     const dirC = attackDir(c);
@@ -846,6 +848,8 @@ export class PlaySim {
       return;
     }
     if (c === this.snapper && !c.d.runner) return;
+    // a punter/holder with the ball is live too: out the back of the end zone (or the side) is dead
+    if (this.kind !== 'scrimmage' && c.side === 'O' && c === this.st.kicker && (c.x < -10 || c.y < 0 || c.y > FIELD_W)) return this.whistle('oob', c.x);
     if (this.kind !== 'scrimmage' && !c.d.runner) return;
     if (c.side === 'O' && c.x >= 100 && c.d.runner) return this.whistle('td', c.x);
     if (c.side === 'D' && c.x <= 0 && c.d.runner) return this.whistle('td', c.x);

@@ -98,7 +98,8 @@ export function buildRoute(agent, routeName, outSign, los) {
   const def = ROUTES[routeName];
   // backfield players measure route depth from the line of scrimmage
   const bx = los != null && agent.x < los - 2.2 ? los - 0.5 : agent.x;
-  const pts = def.pts.map(([d, o]) => ({ x: bx + d, y: clampY(agent.y + o * outSign) }));
+  // nothing past the back of the end zone (end line at 110)
+  const pts = def.pts.map(([d, o]) => ({ x: Math.min(bx + d, 108.6), y: clampY(agent.y + o * outSign) }));
   return { name: routeName, pts, sit: !!def.sit, quick: !!def.quick, delay: def.delay || 0, idx: 0, screen: !!def.screen,
     firstLen: Math.hypot(def.pts[0][0], def.pts[0][1]) };
 }

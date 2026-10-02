@@ -389,7 +389,9 @@ function setupPunt(sim, cfg) {
   wings.forEach((p, i) => { const a = makeAgent(p, 'O', 'W' + i, los - 1.5, ballY + (i ? -3.6 : 3.6)); a.special = puntProtect; off.push(a); });
   const ppA = makeAgent(pp, 'O', 'PP', los - 5, ballY + 0.8); ppA.special = puntProtect; off.push(ppA);
   gun.forEach((p, i) => { const a = makeAgent(p, 'O', 'G' + i, los - 0.8, i ? 3.5 : FIELD_W - 3.5); a.special = gunner; off.push(a); });
-  const pA = makeAgent(P, 'O', 'P', los - 14, ballY); pA.special = punter; off.push(pA);
+  // backed up: the punter shortens up so he stays inside the end line (110 → x = -10)
+  const pDepth = Math.min(14, los + 8.6);
+  const pA = makeAgent(P, 'O', 'P', los - pDepth, ballY); pA.special = punter; off.push(pA);
   // return team
   const d = rp.d;
   const ret1 = pickReturner(rp, 'PR');
@@ -404,7 +406,6 @@ function setupPunt(sim, cfg) {
     a.special = jammer; a.d.gunner = off.find((o) => o.slot === 'G' + i); def.push(a);
   });
   back.forEach((p, i) => { const a = makeAgent(p, 'D', 'B' + i, los + 9, ballY + (i ? -6 : 6)); a.special = retBlocker; def.push(a); });
-  const puntSpot = los - 14;
   const r1 = makeAgent(ret1, 'D', 'PRET', clamp(los + 44 + (P.ratings.kpw - 75) * 0.3, 0, 103), MID_Y);
   r1.special = returner; def.push(r1);
   sim.off = off; sim.def = def; sim.snapper = off[0]; sim.kr = r1;
@@ -548,8 +549,15 @@ function puntResult(outcome, spotX) {
   if (!st.punted) {
     // snap trouble: punter tackled with the ball
     res.possession = 'D'; res.turnover = true;
-    res.desc = `Punt is blocked/botched! ${nm(P)} is swarmed.`;
     res.spotX = Math.min(spotX, sim.los);
+    if (res.spotX <= 0) {
+      res.possession = 'O'; res.turnover = false; res.safety = true; res.spotX = 0;
+      res.desc = outcome === 'oob'
+        ? `${nm(P)} retreats out of the back of the end zone. SAFETY!`
+        : `Punt is botched! ${nm(P)} is swarmed in the end zone for a SAFETY!`;
+      return res;
+    }
+    res.desc = `Punt is blocked/botched! ${nm(P)} is swarmed.`;
     return res;
   }
   if (st.blocked) {
@@ -557,12 +565,15 @@ function puntResult(outcome, spotX) {
     const B = st.blocked;
     res.events.push({ type: 'punt', pid: P.p.id, punts: 1, yds: 0 }, { type: 'def', pid: B.p.id, blk: 1 });
     const land = sim.st.land?.x ?? sim.los - 5;
-    if (sim.rng.chance(land < 12 ? 0.45 : 0.14)) {
+    if (sim.rng.chance(land <= 0 ? 0.5 : land < 12 ? 0.45 : 0.14)) {
       res.td = 'D'; res.spotX = 0;
       res.desc = `${nm(P)}'s punt is BLOCKED by ${nm(B)}! The punt team can't cover it... TOUCHDOWN return!`;
+    } else if (land <= 0) {
+      // the kicking team falls on it in its own end zone (or it squirts out the back)
+      res.safety = true; res.possession = 'O'; res.spotX = 0;
+      res.desc = `${nm(P)}'s punt is BLOCKED by ${nm(B)}! The ball is covered in the end zone. SAFETY!`;
     } else {
       res.spotX = clamp(land, 1, sim.los);
-      if (res.spotX <= 0.5) { res.safety = true; res.possession = 'O'; }
       res.desc = `${nm(P)}'s punt is BLOCKED by ${nm(B)}! Recovered at the ${fieldSpot(res.spotX)}.`;
     }
     return res;
@@ -632,6 +643,7 @@ function fakePassResult(sim, res, outcome, spotX, thrower, head) {
   } else if (!st.fakeThrown) {
     res.kind = 'sack'; res.spotX = spotX;
     res.desc = `${head} ${nmA(thrower)} is swarmed before he can throw.`;
+    if (spotX <= 0) { res.safety = true; res.spotX = 0; res.clockStops = true; res.desc = `${head} ${nmA(thrower)} is swarmed in the end zone. SAFETY!`; }
   } else {
     res.spotX = sim.los; res.clockStops = true;
     res.events.push({ type: 'pass', pid: thrower.p.id, att: 1 });
