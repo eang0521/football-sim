@@ -231,7 +231,7 @@ function kickBallUpdate(B, P) {
         return;
       }
       B.state = 'held'; B.holder = ret; B.pass = null;
-      sim.st.catchX = ret.x; sim.st.kickLive = true;
+      sim.st.catchX = ret.x; sim.st.catchT = sim.t; sim.st.kickLive = true;
       if (P.fairCatch) return sim.whistle('fair_catch', ret.x);
       if (P.kind === 'kickoff' && ret.x > 100 && (ret.x > 103 || sim.rng.chance(0.6))) return sim.whistle('touchback', ret.x);
       ret.vx = -2; ret.vy = 0;

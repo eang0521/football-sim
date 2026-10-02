@@ -298,3 +298,18 @@ table.stats tr.cut td { border-bottom: 2px solid var(--accent); }
 #banner .flagtag { display: inline-block; background: #ffd600; color: #151515; font: 800 12px var(--cond); letter-spacing: .06em; padding: 1px 6px; border-radius: 3px; margin-right: 8px; vertical-align: 2px; }
 .injlist { font-size: 12.5px; line-height: 1.6; }
 .injlist .out { color: var(--bad); }
+
+/* Scoring summary */
+.scoring { font-size: 13px; }
+.scoring .sc-q { font-family: var(--cond); font-size: 13px; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin: 10px 0 2px; }
+.scoring .sc-q:first-child { margin-top: 0; }
+.sc-row { display: grid; grid-template-columns: 64px 36px 44px 1fr auto; gap: 8px; align-items: baseline; padding: 6px 0; border-bottom: 1px solid var(--line); font-variant-numeric: tabular-nums; }
+.sc-team { font-weight: 700; white-space: nowrap; }
+.sc-kind { font-weight: 800; color: var(--accent); }
+.sc-time { color: var(--muted); }
+.sc-sub { display: block; color: var(--muted); font-size: 12px; margin-top: 2px; }
+.sc-score { font-weight: 700; white-space: nowrap; }
+@media (max-width: 600px) {
+  .sc-row { grid-template-columns: 56px 32px 40px 1fr; }
+  .sc-score { grid-column: 4; }
+}

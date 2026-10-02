@@ -214,7 +214,23 @@ export function renderBoxScore(game) {
     return `<div><i class="swatch" style="background:${t.colors.primary}"></i> ${esc(t.abbr)} #${i.p.num} ${esc(i.p.first[0])}. ${esc(i.p.last)} (${i.p.pos}) — ${i.part}, ` +
       `<span class="${i.returnAt === Infinity ? 'out' : ''}">${back ? 'returned' : i.returnAt === Infinity ? 'out for the game' : 'out'}</span> <span style="color:var(--muted)">(Q${Math.min(i.q, 4)})</span></div>`;
   }).join('')}</div></div>` : '';
-  return `${line}<div class="box-sec"><h3>Team stats</h3>${teamStats}</div>${injHtml}<div class="box-top">${side('away')}${side('home')}</div>` +
+  const clk = (c) => { const t = Math.ceil(c); return `${Math.floor(t / 60)}:${String(t % 60).padStart(2, '0')}`; };
+  const qName = (q) => (q <= 4 ? `${['1st', '2nd', '3rd', '4th'][q - 1]} quarter` : q === 5 ? 'Overtime' : `${q - 4}OT`);
+  const kind = (e) => (e.pts === 6 ? 'TD' : e.pts === 3 ? 'FG' : e.def2 ? '2PT' : 'SAF');
+  let lastQ = 0;
+  const scoringRows = (game.scoring || []).map((e) => {
+    const t = game.teams[e.team];
+    const hdr = e.q !== lastQ ? `<div class="sc-q">${qName(e.q)}</div>` : '';
+    lastQ = e.q;
+    const d = e.drive ? `${e.drive.plays} play${e.drive.plays === 1 ? '' : 's'}, ${e.drive.yds} yds, ${top(e.drive.secs)}` : '';
+    const sub = [e.pat ? `(${e.pat})` : '', d].filter(Boolean).join(' · ');
+    return `${hdr}<div class="sc-row"><span class="sc-team"><i class="swatch" style="background:${t.colors.primary}"></i>${esc(t.abbr)}</span>` +
+      `<span class="sc-kind">${kind(e)}</span><span class="sc-time">${clk(e.clock)}</span>` +
+      `<span class="sc-desc">${esc(e.text || '')}${sub ? `<span class="sc-sub">${esc(sub)}</span>` : ''}</span>` +
+      `<span class="sc-score">${esc(away.abbr)} ${e.score.away} – ${esc(home.abbr)} ${e.score.home}</span></div>`;
+  }).join('');
+  const scoringHtml = `<div class="box-sec"><h3>Scoring summary</h3>${scoringRows ? `<div class="scoring">${scoringRows}</div>` : '<div style="color:var(--muted)">No scoring yet.</div>'}</div>`;
+  return `${line}${scoringHtml}<div class="box-sec"><h3>Team stats</h3>${teamStats}</div>${injHtml}<div class="box-top">${side('away')}${side('home')}</div>` +
     `<div class="box-top">${snapHtml('away')}${snapHtml('home')}</div>`;
 }
 

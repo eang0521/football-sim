@@ -27,6 +27,7 @@ export class Game {
     this.stats = new Stats(home, away);
     this.log = [];
     this.drives = [];
+    this.scoring = []; // scoring recap: { team, pts, q, clock, text, score, pat?, drive? }
     const receiver = this.rng.chance(0.5) ? 'home' : 'away';
     this.s = {
       quarter: 1, clock: this.qLen, poss: receiver, ballOn: 25, ballY: MID_Y, down: 1, toGo: 10,
@@ -328,6 +329,33 @@ export class Game {
     s.score[key] += pts;
     const qi = Math.min(s.quarter, 5) - 1;
     s.qScores[key][qi] = (s.qScores[key][qi] || 0) + pts;
+    if (s.phase === 'pat' && pts < 6) return; // PATs are attached to their touchdown after the play
+    this.scoring.push({ team: key, pts, q: s.quarter, clock: s.clock, score: { ...s.score } });
+  }
+
+  // Fill in the scoring recap for this play: the play text and drive summary, or the PAT result on the TD.
+  recordScoring(meta, text, nScoring, nDrives) {
+    const s = this.s;
+    if (meta.type === 'xp' || meta.type === 'conversion') {
+      const td = this.scoring.findLast((e) => e.pts === 6);
+      if (!td || td.pat) return;
+      const tag = meta.type === 'xp' ? (s.score[td.team] > td.score[td.team] ? 'PAT good' : 'PAT no good')
+        : s.score[td.team] > td.score[td.team] ? 'Two-point conversion good' : 'Two-point conversion failed';
+      td.pat = tag;
+      if (s.score[other(td.team)] > td.score[other(td.team)]) { // defensive 2-point return: its own entry
+        this.scoring.push({ team: other(td.team), pts: 2, q: s.quarter, clock: s.clock, text: 'Defensive two-point return.', def2: true, score: { ...s.score } });
+      }
+      td.score = { ...s.score };
+      return;
+    }
+    const drive = this.drives.slice(nDrives).find((d) => d.result === 'TD' || d.result === 'FG');
+    for (const e of this.scoring.slice(nScoring)) {
+      e.text = text;
+      if (drive && drive.team === e.team && drive.plays > 0) {
+        const secs = (drive.startQ === e.q ? drive.startClock - e.clock : drive.startClock + (e.q - drive.startQ - 1) * this.qLen + (this.qLen - e.clock));
+        e.drive = { plays: drive.plays, yds: Math.round(drive.yds), secs: Math.max(0, Math.round(secs)) };
+      }
+    }
   }
 
   startDrive(key, ballOn) {
@@ -418,6 +446,7 @@ export class Game {
       ? `${meta.pre.dstr} at ${meta.pre.fpos}` : meta.type === 'kickoff' ? 'Kickoff' : meta.type === 'xp' ? 'PAT' : '2-PT';
     let text = res.desc;
     let changed = false, scored = false;
+    const nScoring = this.scoring.length, nDrives = this.drives.length;
     if (pen.mode === 'nullify') {
       s.ballOn = pen.state.ballOn; s.down = pen.state.down; s.toGo = pen.state.toGo; s.phase = 'scrimmage';
       if (pen.offense && (s.quarter === 2 || s.quarter === 4) && clockBefore <= 60 && this.clockRunning) {
@@ -562,6 +591,7 @@ export class Game {
       text += ` PENALTY: ${describeFoul(f, this.teams[def])}, ${Math.round(y)} yard${Math.round(y) === 1 ? '' : 's'}${y < 15 ? ' (half the distance)' : ''}, automatic first down.`;
     } else if (pen.post) text += ` (${FOULS[pen.post.type].name} on ${this.teams[def].abbr} enforced on the kickoff.)`;
     this.updateMomentum(sim, { scored, changed });
+    this.recordScoring(meta, text, nScoring, nDrives);
     this.addLog(scored ? 'score' : res.turnover ? 'turnover' : pen.flag ? 'penalty' : 'play', text, { prefix, off, label: meta.label });
     for (const l of reviewLogs) this.addLog('review', l);
     for (const l of injuryLogs) this.addLog('injury', l);
@@ -815,13 +845,18 @@ export class Game {
     const teamOf = (side) => (side === 'O' ? off : def);
     const yardsWord = (y) => { const n = Math.round(Math.abs(y)); return `${n} yard${n === 1 ? '' : 's'}`; };
 
-    // Kick returns: holding / illegal block by the return team, enforced from the spot of the foul.
+    // Kick returns: holding / illegal block by the return team (yard lines below are the return team's).
+    // Enforced from the spot of the foul when it is behind the basic spot, otherwise from the basic spot:
+    // the end of the run, or for a punt foul before the catch, where the kick ended (post-scrimmage kick spot).
     if (meta.type === 'kickoff' || meta.type === 'punt') {
       const f = fouls.find((x) => x.side === 'R');
       const returned = res.outcome === 'tackle' || res.outcome === 'oob' || res.outcome === 'td';
       if (!f || res.possession !== 'D' || res.touchback || !returned) return { mode: 'none' };
       const R = res.td === 'D' ? 100 : 100 - res.spotX;
-      const F = clamp(100 - f.x, 1, 99);
+      const st = sim.st || {};
+      const duringKick = meta.type === 'punt' && st.catchX != null && !(f.t >= st.catchT);
+      const basic = duringKick ? Math.min(R, 100 - st.catchX) : R;
+      const F = clamp(Math.min(100 - f.x, basic), 1, 99);
       const y = Math.min(10, F / 2);
       const newR = F - y;
       if (newR >= R) return { mode: 'none', suffix: `(${FOULS[f.type].name} on ${this.teams[def].abbr} declined.)`, flag: true };
@@ -829,7 +864,7 @@ export class Game {
       const wasTD = !!res.td;
       res.td = null;
       this.countPenalty(def, R - newR);
-      return { mode: 'kick', flag: true, suffix: `${wasTD ? 'TOUCHDOWN NULLIFIED. ' : ''}PENALTY: ${describeFoul(f, this.teams[def])}, ${yardsWord(y)} from the spot of the foul.` };
+      return { mode: 'kick', flag: true, suffix: `${wasTD ? 'TOUCHDOWN NULLIFIED. ' : ''}PENALTY: ${describeFoul(f, this.teams[def])}, ${yardsWord(y)} from the ${100 - f.x < basic ? 'spot of the foul' : duringKick ? 'end of the kick' : 'end of the return'}.` };
     }
     if (meta.type !== 'scrimmage') return { mode: 'none' };
 
