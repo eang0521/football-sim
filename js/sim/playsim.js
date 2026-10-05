@@ -851,6 +851,11 @@ export class PlaySim {
     // a punter/holder with the ball is live too: out the back of the end zone (or the side) is dead
     if (this.kind !== 'scrimmage' && c.side === 'O' && c === this.st.kicker && (c.x < -10 || c.y < 0 || c.y > FIELD_W)) return this.whistle('oob', c.x);
     if (this.kind !== 'scrimmage' && !c.d.runner) return;
+    // protecting a late lead: past the sticks with open field ahead, the runner goes down in bounds
+    if (this.ctx.giveUp && c.side === 'O' && c.d.runner && this.kind === 'scrimmage' && c.x >= this.firstDownX + 0.5 && c.x < 99) {
+      const near = Math.min(...this.def.filter((d) => !d.down).map((d) => Math.hypot(d.x - c.x, d.y - c.y)));
+      if (near > 2.5) { this.st.gaveUp = true; c.down = true; c.anim = 'down'; return this.whistle('tackle', c.x); }
+    }
     if (c.side === 'O' && c.x >= 100 && c.d.runner) return this.whistle('td', c.x);
     if (c.side === 'D' && c.x <= 0 && c.d.runner) return this.whistle('td', c.x);
     if (c.y < 0 || c.y > FIELD_W) return this.whistle('oob', c.x);
@@ -938,7 +943,7 @@ function buildScrimmageResult(sim, outcome, spotX) {
   }
   if (st.kneel) {
     res.kind = 'kneel';
-    res.spotX = los - 1;
+    res.spotX = los - 1; res.elapsed = Math.max(res.elapsed, 1.5); // the clock runs while the QB takes the snap and goes down
     res.desc = `${nm(sim.qb())} kneels.`;
     ev('rush', sim.qb().p, { yds: -1 });
     return res;
@@ -1030,6 +1035,7 @@ function buildScrimmageResult(sim, outcome, spotX) {
   if (res.td === 'O') { res.desc += ', TOUCHDOWN!'; res.clockStops = true; }
   else if (res.spotX <= 0 && !st.fumble) { res.safety = true; res.desc += ', tackled in the end zone. SAFETY!'; res.clockStops = true; }
   else if (outcome === 'oob') { res.desc += ' (out of bounds).'; }
+  else if (st.gaveUp) { res.desc += ', and goes down in bounds to keep the clock running.'; }
   else if (st.tacklers.length) {
     res.desc += ` (${st.tacklers.map(nm).join(', ')}).`;
     if (yds < 0) ev('def', st.tacklers[0].p, { tfl: 1 });

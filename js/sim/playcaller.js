@@ -2,7 +2,8 @@
 import { FORMATIONS, PASS_PLAYS, RUN_PLAYS, DEF_CALLS, COVERAGES } from './playbook.js';
 import { clamp } from '../util/vec.js';
 
-// ctx (offense perspective): { down, toGo, ballOn, quarter, clock, scoreDiff, twoMin, isConversion }
+// ctx (offense perspective): { down, toGo, ballOn, quarter, clock, scoreDiff, twoMin, mode, isConversion }
+// mode: the clock plan from Game.clockMode (normal, hurry, kill, milk, out)
 export function passProbability(coach, ctx) {
   let p = coach.passRate - 0.16;
   const { down, toGo, ballOn, quarter, clock, scoreDiff } = ctx;
@@ -18,6 +19,11 @@ export function passProbability(coach, ctx) {
     else if (scoreDiff > 0 && quarter >= 4) p -= 0.15;
   }
   if (ctx.twoMin) p = Math.max(p, 0.82);
+  // sitting on the ball: an incompletion stops the clock, so run it unless the down forces a throw
+  const mustThrow = down >= 3 && toGo >= 6;
+  if (ctx.mode === 'milk') p = mustThrow ? 0.2 : 0.08; // already in range: a sack or a pick is the only way to lose it
+  else if (ctx.mode === 'out') p = mustThrow ? 0.45 : 0.1;
+  else if (ctx.mode === 'kill' && clock <= 240) p = Math.min(p, mustThrow ? 0.6 : 0.2 + 0.2 * (clock / 240));
   if (ctx.isConversion) p = 0.62;
   return clamp(p, 0.08, 0.96);
 }

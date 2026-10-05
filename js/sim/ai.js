@@ -81,6 +81,7 @@ function runnerThink(sim, a) {
     }
     const vis = a.r.awr / 100;
     const wantOOB = sim.ctx && sim.ctx.wantOOB && a.side === sim.ctx.oobSide;
+    const stayIn = sim.ctx && sim.ctx.stayIn && a.side === sim.ctx.oobSide;
     const threats = [];
     for (const o of opp) {
       if (o.down) continue;
@@ -98,7 +99,7 @@ function runnerThink(sim, a) {
       let free = MAX_LOOK, bonus = 0;
       for (let s = 0.75; s <= MAX_LOOK; s += 0.75) {
         const px = a.x + ux * s, py = a.y + uy * s;
-        if (py < 0.3 || py > FIELD_W - 0.3) { free = s; if (wantOOB) bonus += 3; break; }
+        if (py < 0.3 || py > FIELD_W - 0.3) { free = s; if (wantOOB) bonus += 3; else if (stayIn) bonus -= 3; break; }
         if ((px - goalX) * dir > 0.3) { free = MAX_LOOK; bonus += 6; break; }
         const tr = s / vAvg + turn;
         let hit = false;

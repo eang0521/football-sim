@@ -14,6 +14,8 @@ import { makeWeather, describeWeather, effectiveKickDist } from './weather.js';
 import { FIELD_W, MID_Y, HASH_L, HASH_R, QUARTER_LEN, OT_LEN } from './constants.js';
 
 const other = (k) => (k === 'home' ? 'away' : 'home');
+const PLAY_CLOCK = 39;  // seconds a team milking the clock takes between snaps
+const KNEEL_SECS = 1.5; // clock a kneel-down takes
 const ORD = ['', '1st', '2nd', '3rd', '4th'];
 export const fmtClock = (s) => { s = Math.max(0, Math.ceil(s)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
 export const qName = (q) => (q <= 4 ? ORD[q] : q === 5 ? 'OT' : `${q - 4}OT`);
@@ -75,16 +77,69 @@ export class Game {
     const s = this.s;
     const diff = s.score[key] - s.score[other(key)];
     const q = s.quarter;
-    const twoMin = (q === 2 && s.clock <= 120) || (q >= 4 && ((s.clock <= 150 && diff <= 0) || (s.clock <= 300 && diff < -8)));
+    const mode = this.clockMode(key);
     // last snap of a half from beyond field-goal range: throw it up
     const hail = s.clock <= 8 && s.ballOn >= 38 && s.ballOn < 75 && (q === 2 || (q === 4 && diff < 0 && diff >= -8));
     return {
-      down: s.down, toGo: s.toGo, ballOn: s.ballOn, quarter: q, clock: s.clock, scoreDiff: diff, twoMin,
+      down: s.down, toGo: s.toGo, ballOn: s.ballOn, quarter: q, clock: s.clock, scoreDiff: diff, twoMin: mode === 'hurry', mode,
       timeouts: s.timeouts[key],
       defPrevent: false, hail,
     };
   }
   kicker(key) { return depthChart(this.teams[key]).K[0] || depthChart(this.teams[key]).P[0]; }
+  fgProb(key) {
+    const fgDist = 117 - this.s.ballOn;
+    return Math.max(0, fgProbability(this.kicker(key), effectiveKickDist(this.weather, fgDist, this.dirOf(key))) - this.weather.fgPen);
+  }
+
+  // ---------- clock management ----------
+  // How the team with the ball treats the clock on this snap:
+  //   kill  - leading late: run it, stay in bounds, snap with the play clock nearly out, kneel when it's safe
+  //   milk  - tied or down 1-2 in easy field-goal range: drain the clock and kick on the last snap
+  //   hurry - two-minute drill: get out of bounds, hurry to the line, spend timeouts, spike
+  //   out   - end of the half (or a tie late) too far away to score: run the clock out and take it to the locker room
+  clockMode(key) {
+    const s = this.s, q = s.quarter, clock = s.clock;
+    const diff = s.score[key] - s.score[other(key)];
+    if (q >= 4 && diff > 0) return 'kill';
+    if (q === 4 && diff <= 0 && diff >= -2 && clock <= 150 && s.ballOn >= 60 && this.fgProb(key) >= 0.8) return 'milk';
+    if ((q === 2 || (q === 4 && diff === 0)) && clock <= 120) return this.canReachRange(key) ? 'hurry' : 'out';
+    if (q >= 4 && ((clock <= 150 && diff <= 0) || (clock <= 300 && diff < -8))) return 'hurry';
+    return 'normal';
+  }
+
+  // Can a hurry-up offense realistically get into field-goal range before time runs out?
+  canReachRange(key) {
+    const s = this.s;
+    const yds = s.clock * 0.6 + s.timeouts[key] * 9;
+    const need = Math.max(0, 65 - s.ballOn);
+    return need <= yds * (0.7 + 0.5 * this.teams[key].coach.aggression);
+  }
+
+  // Clock the offense can burn by kneeling `plays` times, with `gaps` play clocks between/after those snaps
+  // that the defense can stop with its timeouts (the two-minute warning stops one too).
+  kneelBurn(key, plays, gaps = plays - 1) {
+    const s = this.s;
+    const warn = (s.quarter === 2 || s.quarter === 4) && !s.warned && s.clock > 120 ? 1 : 0;
+    const stops = Math.min(s.timeouts[other(key)] + warn, gaps);
+    return plays * KNEEL_SECS + (gaps - stops) * PLAY_CLOCK;
+  }
+
+  // Can the offense take a knee from here instead of running a play?
+  kneelOK(key, mode) {
+    const s = this.s;
+    if (mode !== 'kill' && mode !== 'out') return false;
+    if (s.clock <= this.kneelBurn(key, 5 - s.down)) return true; // kneel it all the way out
+    if (s.down >= 4) return false;                                // otherwise punt on 4th down
+    // kneel through 3rd down and punt, when that leaves the other team too little time to do anything
+    const left = s.clock - this.kneelBurn(key, 4 - s.down, 4 - s.down) - 8;
+    const diff = s.score[key] - s.score[other(key)];
+    const safe = mode === 'out' ? 12 : diff >= 9 ? 30 : diff >= 4 ? 10 : 6;
+    return left <= safe;
+  }
+
+  // Queue the offense's next calls (a spike, the field-goal unit) on its current possession.
+  queueCalls(key, calls) { this.s.next = { poss: key, calls }; }
 
   // ---------- flow ----------
   nextSim(opts = {}) {
@@ -143,8 +198,12 @@ export class Game {
         } else offCall = callOffense(this.teams[off], ctx, rng, this.adapt(off));
         const defCall = callDefense(this.teams[def], defCtx, offCall, rng, this.oppTend(off));
         if (!special) offCall = this.maybeAudible(off, ctx, offCall, defCall) || offCall;
-        const wantOOB = ctx.twoMin && ctx.scoreDiff <= 0 || (s.quarter === 2 && s.clock < 90);
-        cfg = { ...base, kind, offCall, defCall, firstDownX: s.ballOn + s.toGo, ctx: { ...ctx, wantOOB, oobSide: 'O' },
+        const wantOOB = ctx.mode === 'hurry';
+        const stayIn = ctx.mode === 'kill' || ctx.mode === 'milk' || ctx.mode === 'out';
+        // leading late, where a first down lets the offense kneel out the clock: the runner goes down
+        // in bounds past the sticks instead of scoring and handing the ball back
+        const giveUp = ctx.mode === 'kill' && s.ballOn + s.toGo < 98 && s.clock - 6 <= this.kneelBurn(off, 4);
+        cfg = { ...base, kind, offCall, defCall, firstDownX: s.ballOn + s.toGo, ctx: { ...ctx, wantOOB, stayIn, giveUp, oobSide: 'O' },
           spike: decision === 'spike', intSafety: decision === 'safety' };
         meta = { type: kind === 'kneel' ? 'kneel' : 'scrimmage', off, def, offCall, defCall,
           label: special ? offCall.name : `${FORMATIONS[offCall.formation].name.replace(/ \(\d+\)$/, '')} (${FORMATIONS[offCall.formation].personnel}): ${offCall.name}${offCall.motion ? ' (motion)' : ''} vs ${defCall.name}`,
@@ -191,25 +250,29 @@ export class Game {
     const s = this.s;
     const coach = this.teams[off].coach;
     const q = s.quarter, diff = ctx.scoreDiff, clock = s.clock;
-    // kneel to run out the clock
-    const defTO = s.timeouts[other(off)];
-    if (s.spikeNext) { s.spikeNext = false; if (s.down < 4 && clock > 2) return 'spike'; }
+    // calls lined up after the last play: a clock-stopping spike, the field-goal unit
+    const queued = s.next;
+    s.next = null;
+    if (queued && queued.poss === off && queued.calls.length) {
+      const [call, ...rest] = queued.calls;
+      if (rest.length) this.queueCalls(off, rest);
+      if (call === 'spike' && s.down < 4 && clock > 2) return 'spike';
+      if (call === 'fg' && this.fgProb(off) > 0.1) return 'fg';
+    }
     // protect a late lead by conceding two points instead of punting from the end zone
     if (q >= 4 && s.down === 4 && s.ballOn <= 6 && diff >= 3 && clock <= 45) return 'safety';
-    if (q >= 4 && diff > 0) {
-      const plays = 4 - s.down + 1;
-      const burn = plays * 1.5 + (plays - 1) * 40 - Math.min(defTO, plays - 1) * 40;
-      if (clock <= burn + 1) return 'kneel';
-    }
-    if (q === 2 && clock <= 25 && !ctx.hail && (s.ballOn < 45 || (clock <= 8 && s.ballOn < 55)) && (diff >= 0 || s.ballOn < 35)) return 'kneel';
-    const fgDist = 117 - s.ballOn;
-    const pFG = Math.max(0, fgProbability(this.kicker(off), effectiveKickDist(this.weather, fgDist, this.dirOf(off))) - this.weather.fgPen);
-    // end-of-half kicks on any down
-    if (clock <= 7 && pFG > 0.2 && (q === 2 || (q >= 4 && diff <= 0 && diff >= -3))) return 'fg';
+    // victory formation / take it to the locker room
+    if (this.kneelOK(off, ctx.mode)) return 'kneel';
+    const pFG = this.fgProb(off);
+    // end-of-half kicks on any down: the last snap, or the last one there's time for without a timeout
+    const kickOK = q === 2 || (q >= 4 && diff <= 0 && diff >= -3);
+    if (kickOK && pFG > 0.2 && (clock <= 7 || (clock <= 12 && !s.timeouts[off] && pFG > 0.35))) return 'fg';
     if (s.down < 4) return 'play';
     const late = q >= 4;
     const desperate = late && ((diff < 0 && clock < 150) || (diff < -3 && clock < 330) || (diff < -8 && clock < 520) || (diff < -16 && clock < 800));
-    if (desperate && !(diff >= -3 && pFG > 0.5 && clock < 60)) return 'play';
+    // a makeable kick that ties or takes the lead goes to the win-probability comparison below
+    const forced = desperate && !(diff >= -3 && pFG > 0.5);
+    if (forced) return 'play';
     // 4th down: compare win probability after going for it, kicking, and punting.
     const W = this.fourthDownWP(off, pFG);
     const agg = coach.aggression;
@@ -218,11 +281,11 @@ export class Game {
     const kick = W.fg != null && W.fg >= W.punt ? 'fg' : 'punt';
     const kickWP = kick === 'fg' ? W.fg : W.punt;
     const need = 0.03 - agg * 0.025 + this.rng.normal(0, 0.004);
-    const pick = desperate || W.go - kickWP > need ? 'play' : kick;
+    const pick = W.go - kickWP > need ? 'play' : kick;
     if (pick === 'play' && !desperate) {
       const alt = W.fg != null && W.fg >= W.punt ? ['a field goal', W.fg] : ['a punt', W.punt];
       const pc = (x) => `${Math.round(x * 100)}%`;
-      this.addLog('info', `${this.teams[off].name} keep the offense on the field on 4th & ${s.toGo}: win probability ${pc(W.go)} going for it vs ${pc(alt[1])} with ${alt[0]}.`);
+      this.addLog('info', `${this.teams[off].name} keep the offense on the field on 4th & ${Math.max(1, Math.round(s.toGo))}: win probability ${pc(W.go)} going for it vs ${pc(alt[1])} with ${alt[0]}.`);
     }
     return pick;
   }
@@ -278,6 +341,7 @@ export class Game {
     if (s.clock > 0 || s.phase === 'pat') return;
     const q = s.quarter;
     this.lastAbs = null;
+    s.next = null;
     if (q === 1 || q === 3) {
       this.addLog('quarter', `End of ${qName(q)} quarter.`);
       s.quarter++; s.clock = this.qLen;
@@ -932,34 +996,73 @@ export class Game {
     const s = this.s;
     const offK = s.poss, defK = other(offK);
     const ctx = this.ctxFor(offK);
-    const q = s.quarter;
+    const q = s.quarter, mode = ctx.mode, rng = this.rng;
     let r;
-    if (ctx.twoMin && (ctx.scoreDiff <= 0 || q === 2)) r = 13 + this.rng.range(0, 5);
-    else if (q >= 4 && ctx.scoreDiff > 0) r = 38 + this.rng.range(0, 2);
-    else r = 45 - this.teams[offK].coach.tempo * 8 + this.rng.range(-2, 2);
+    if (mode === 'hurry') r = 13 + rng.range(0, 5);
+    else if (mode === 'kill' || mode === 'milk' || mode === 'out') r = PLAY_CLOCK - 1 + rng.range(0, 2); // snap it as the play clock expires
+    else r = 45 - this.teams[offK].coach.tempo * 8 + rng.range(-2, 2);
     if (res.oob) r *= 0.55;
-    // timeouts
-    const dDiff = -ctx.scoreDiff;
-    const toWindow = dDiff >= -8 ? 150 : 240; // down two scores: start stopping the clock earlier
-    if (q >= 4 && s.clock <= toWindow && dDiff <= 0 && dDiff >= -16 && s.timeouts[defK] > 0 && s.clock > 5) {
-      s.timeouts[defK]--; this.addLog('timeout', `Timeout ${this.teams[defK].abbr} (${s.timeouts[defK]} left).`); return;
-    }
-    if (((q >= 4 && ctx.scoreDiff <= 0 && ctx.scoreDiff >= -16 && s.clock <= 110) || (q === 2 && s.clock <= 40 && s.ballOn >= 40))
-        && s.timeouts[offK] > 0 && s.clock > 3) {
-      s.timeouts[offK]--; this.addLog('timeout', `Timeout ${this.teams[offK].abbr} (${s.timeouts[offK]} left).`); return;
-    }
+    const timeout = (k) => { s.timeouts[k]--; this.addLog('timeout', `Timeout ${this.teams[k].abbr} (${s.timeouts[k]} left).`); };
+    // the two-minute warning stops the clock for free: nobody spends a timeout ahead of it
     if ((q === 2 || q === 4) && !s.warned && s.clock > 120 && s.clock - r <= 120) {
       s.clock = 120; s.warned = true; this.addLog('info', 'Two-minute warning.'); return;
     }
-    // hurry-up with no timeouts to burn: rush to the line and spike it
-    const hurry = (q === 2 && s.clock <= 60 && s.ballOn >= 35) || (q >= 4 && ctx.scoreDiff <= 0 && ctx.scoreDiff >= -16 && s.clock <= 120);
-    if (hurry && s.down <= 3 && s.timeouts[offK] === 0 && s.clock > 8 && s.clock <= 45 && s.ballOn >= 35 && this.rng.chance(0.65)) {
-      r = 6 + this.rng.range(0, 3); s.spikeNext = true;
+    if (this.defenseTimeout(offK, ctx)) return timeout(defK);
+    const TO = s.timeouts[offK];
+    // the field goal decides it: run the clock down to the last few seconds, then timeout and kick
+    if (mode === 'milk') {
+      if (s.clock - r <= 4) {
+        if (TO) {
+          s.clock = Math.min(s.clock, 2 + rng.range(0, 2));
+          timeout(offK); this.queueCalls(offK, ['fg']); return;
+        }
+        if (s.clock >= 9) { r = Math.max(7, s.clock - 2 - rng.range(0, 2)); this.queueCalls(offK, ['fg']); } // field-goal unit rushes on
+      }
+    } else if (mode === 'hurry') {
+      const pFG = this.fgProb(offK);
+      const fgEnough = q === 2 || (ctx.scoreDiff <= 0 && ctx.scoreDiff >= -3);
+      // keep the last timeout to set up a game-tying or winning kick
+      const spare = TO - (fgEnough && pFG > 0.3 && s.clock > 25 ? 1 : 0);
+      const limit = s.clock <= 25 ? Infinity : (ctx.scoreDiff < -8 ? 60 : 35) + 18 * spare;
+      if (spare > 0 && s.clock > 3 && s.clock <= limit) return timeout(offK);
+      if (spare <= 0 && s.clock > 8) {
+        if (fgEnough && pFG >= 0.5 && s.clock <= 30) {
+          // in range with no timeout to spare: spike it to get one more shot, or with too little time
+          // for that (or on 4th down), sprint the kicking unit on
+          if (TO) return timeout(offK);
+          if (s.down <= 3 && s.clock > 15) { r = 6 + rng.range(0, 3); this.queueCalls(offK, ['spike']); }
+          else { r = Math.min(s.clock - 1, 8 + rng.range(0, 3)); this.queueCalls(offK, ['fg']); }
+        } else if (s.down <= 2 && s.clock <= 45 && s.ballOn >= 35 && rng.chance(0.65)) {
+          // hurry to the line and spike it to stop the clock
+          r = 6 + rng.range(0, 3); this.queueCalls(offK, ['spike']);
+        }
+      }
     }
     const before = s.clock;
     s.clock = Math.max(0, s.clock - r);
     this.clockRunning = true;
     if (this._topOff) this.stats.team[this._topOff].top += before - s.clock;
+  }
+
+  // Does the defense stop the clock after an in-bounds play? (ctx is the offense's)
+  defenseTimeout(offK, ctx) {
+    const s = this.s, defK = other(offK), q = s.quarter;
+    if (!s.timeouts[defK] || s.clock <= 5) return false;
+    if (q >= 4) {
+      const dDiff = -ctx.scoreDiff;
+      if (dDiff > 0 || dDiff < -24) return false;
+      // no point once the offense can kneel it out anyway
+      if (ctx.scoreDiff > 0 && s.clock <= this.kneelBurn(offK, 5 - s.down)) return false;
+      // trailing: save every second for the comeback; tied: only near the end
+      const window = dDiff === 0 ? 120 : dDiff >= -8 ? 180 : 300;
+      return s.clock <= window;
+    }
+    // before the half, a defense with timeouts stops the clock on an offense that is sitting on the ball,
+    // to get it back with time for a drive of its own
+    if (q === 2 && ctx.mode === 'out' && s.clock <= 120 && s.clock >= 30 && s.down >= 2 && s.ballOn <= 50) {
+      return this.teams[defK].coach.aggression > 0.3;
+    }
+    return false;
   }
 
   // Simulate the rest of the game instantly
