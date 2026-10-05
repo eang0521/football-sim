@@ -31,7 +31,7 @@ const ARCH = {
   P: { def: 25, spd: 50, acc: 50, agi: 50, str: 40, awr: 60, kpw: 82, kac: 76, tak: 20 },
 };
 // Rating keys that matter most for each position (used to vary quality + compute OVR)
-const OVR_WEIGHTS = {
+export const OVR_WEIGHTS = {
   QB: { tha: 3, thp: 2, awr: 3, spd: 0.5, agi: 0.5 },
   RB: { spd: 2, acc: 1.5, agi: 2, btk: 2, car: 1, cth: 1, awr: 1 },
   FB: { rbk: 3, str: 2, pbk: 1, btk: 1, car: 1 },

@@ -3,19 +3,9 @@ import { saveLeague, resetLeague, exportLeagueJSON, importLeagueJSON } from '../
 import { FRANCHISES } from '../data/names.js';
 import { TRAITS, traitsFor } from '../data/traits.js';
 import { RNG } from '../util/rng.js';
+import { coachPanelHTML, bindCoachPanel } from './ratings.js';
 
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
-
-const COACH_SLIDERS = [
-  ['passRate', 'Pass rate', 0.3, 0.8, 'How often the offense throws on neutral downs'],
-  ['aggression', '4th-down aggression', 0, 1, 'Willingness to go for it / attempt 2-pt'],
-  ['deepShot', 'Deep shots', 0, 1, 'Appetite for vertical concepts'],
-  ['playAction', 'Play action', 0, 0.8, 'Share of play-action passes'],
-  ['tempo', 'Tempo', 0, 1, 'Pace between plays'],
-  ['blitzRate', 'Blitz rate', 0, 0.7, 'How often the defense sends extra rushers'],
-  ['manRate', 'Man coverage', 0, 1, 'Man vs zone preference'],
-  ['twoHigh', 'Two-high shells', 0, 1, 'Cover 2/4 vs single-high preference'],
-];
 
 // One-line summary of a player's real last-season stats (imported leagues only).
 function realSummary(p) {
@@ -83,11 +73,7 @@ export class TeamEditor {
             <label>Pants<input type="color" data-c="pants" value="${t.colors.pants}" /></label>
             <label>Team OVR<div style="font:800 24px var(--cond);color:var(--accent)">${tr.ovr} <span style="font-size:14px;color:var(--muted)">OFF ${tr.off} · DEF ${tr.def}</span></div></label>
           </div>
-          <div class="ed-coach">
-            <label>Head coach<input data-coach-name value="${esc(t.coach.name)}" maxlength="24" style="background:#1b2638;color:var(--text);border:1px solid rgba(255,255,255,.1);border-radius:6px;padding:5px 7px" /></label>
-            <label>Run scheme<select data-coach="runScheme">${['zone', 'power', 'balanced'].map((s) => `<option ${t.coach.runScheme === s ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
-            ${COACH_SLIDERS.map(([k, lab, mn, mx, tip]) => `<label title="${tip}">${lab} <output>${Math.round(t.coach[k] * 100)}</output><input type="range" data-coach="${k}" min="${mn}" max="${mx}" step="0.01" value="${t.coach[k]}" /></label>`).join('')}
-          </div>
+          <details class="ed-coach-wrap"><summary>Coaching preferences: ${esc(t.coach.name)}</summary>${coachPanelHTML(t.coach)}</details>
           <div class="pos-filter">${['ALL', ...POSITIONS].map((p) => `<button data-pos="${p}" class="${p === this.posFilter ? 'on' : ''}">${p}</button>`).join('')}</div>
           <div class="ed-roster"><table>
             <tr><th>#</th><th>First</th><th>Last</th><th>Pos</th><th>Ht</th><th>Wt</th><th>OVR</th><th>Traits</th>${real ? `<th>${realSeason || ''} stats</th>` : ''}${RATING_KEYS.map((k) => `<th title="${RATING_LABELS[k]}">${k.toUpperCase()}</th>`).join('')}</tr>
@@ -121,14 +107,7 @@ export class TeamEditor {
       save(); this.render();
     }));
     R.querySelectorAll('[data-c]').forEach((i) => i.addEventListener('change', () => { t.colors[i.dataset.c] = i.value; save(); this.render(); }));
-    R.querySelector('[data-coach-name]').addEventListener('change', (e) => { t.coach.name = e.target.value.trim() || t.coach.name; save(); });
-    R.querySelectorAll('[data-coach]').forEach((i) => i.addEventListener('input', () => {
-      const k = i.dataset.coach;
-      t.coach[k] = k === 'runScheme' ? i.value : +i.value;
-      const o = i.parentElement.querySelector('output');
-      if (o) o.textContent = Math.round(+i.value * 100);
-    }));
-    R.querySelectorAll('[data-coach]').forEach((i) => i.addEventListener('change', save));
+    bindCoachPanel(R, t.coach, save);
     R.querySelectorAll('tr[data-pid]').forEach((row) => {
       const p = t.roster.find((x) => x.id === row.dataset.pid);
       row.querySelectorAll('[data-p]').forEach((i) => i.addEventListener('change', () => {

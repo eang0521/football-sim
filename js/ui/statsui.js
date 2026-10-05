@@ -1,5 +1,6 @@
 // Season stats pages: sortable league tables, team stats, and a player page with a game log and a
 // side-by-side with the player's real stats (imported leagues).
+import { showPlayerCard } from './ratings.js';
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const n = (x) => x || 0;
 const r1 = (x) => (Number.isFinite(x) ? Math.round(x * 10) / 10 : 0);
@@ -165,12 +166,13 @@ export class StatsView {
         <div>
           <div class="pl-name">${esc(name)} <span class="pos">${esc(p?.pos || x?.pos || '')}${p ? ` #${p.num}` : ''}</span>${p?.injury ? ` <span class="inj-tag">${esc(p.injury.status)}</span>` : ''}</div>
           <div class="pl-meta">${t ? `${this.ui.chip(t.id)} ${esc(t.city)} ${esc(t.name)} · ` : ''}${p ? `${Math.floor(p.height / 12)}'${p.height % 12}" ${p.weight} lb${p.age ? ` · age ${p.age}` : ''}${p.college ? ` · ${esc(p.college)}` : ''}` : ''}</div>
-          ${p ? `<div class="pl-meta">OVR <b>${p.ovr}</b>${p.madden ? ` · Madden ${p.madden.ovr}` : ''}${traits ? ` · ${esc(traits.replace(/_/g, ' '))}` : ''}</div>` : ''}
+          ${p ? `<div class="pl-meta">OVR <b>${p.ovr}</b>${p.madden ? ` · Madden ${p.madden.ovr}` : ''}${traits ? ` · ${esc(traits.replace(/_/g, ' '))}` : ''} · <a href="#" class="plink" id="pl-ratings">View all ratings</a></div>` : ''}
         </div>
       </div>
       ${cats.map(tbl).join('') || '<p style="color:var(--muted)">No stats yet.</p>'}
       ${log.length ? `<h3 class="se-h3">Game log</h3><div class="st-scroll"><table class="stats st-table"><tr><th>Week</th><th>Opp</th><th>Result</th><th style="text-align:left">Line</th></tr>
         ${log.map((g) => `<tr><td>${esc(g.w)}</td><td>${g.ha} ${this.ui.chip(g.opp)}</td><td>${esc(g.res)}</td><td style="text-align:left">${esc(logLine(g.L))}</td></tr>`).join('')}</table></div>` : ''}`;
     body.querySelector('#pl-back').onclick = () => this.ui.closePlayer();
+    body.querySelector('#pl-ratings')?.addEventListener('click', (e) => { e.preventDefault(); showPlayerCard(p, { team: t }); });
   }
 }

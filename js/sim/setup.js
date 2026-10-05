@@ -445,6 +445,14 @@ function assignDefense(sim, cfg, D, cov, rec) {
     covers = greedyZones(covers, under);
     for (const d of covers) { d.role = 'zone'; d.d.zone = zoneSpot('hookM', los, ballY); }
   }
+  // money downs: underneath zones sit at the sticks, so what's caught short of them gets rallied to
+  const toGo = (cfg.firstDownX ?? los + 10) - los;
+  if (cfg.ctx?.down >= 3 && toGo >= 4 && !cfg.ctx.isConversion) {
+    for (const d of sim.def) {
+      const z = d.role === 'zone' && d.d.zone;
+      if (z && !z.deep) d.d.zone = { ...z, x: Math.min(Math.max(z.x, los + toGo + 1), z.x + 6) };
+    }
+  }
   // man defenders in press move tighter
   for (const d of sim.def) {
     if (d.role === 'man' && !d.d.help && cov.shell === 0) d.d.tight = true;

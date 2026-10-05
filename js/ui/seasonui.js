@@ -5,6 +5,7 @@ import {
 } from '../season/season.js';
 import { saveLeague } from '../data/storage.js';
 import { StatsView, realAsLine } from './statsui.js';
+import { showPlayerCard, bindCards, teamRatingHTML, lineupHTML, rosterHTML, coachPanelHTML, bindCoachPanel, leagueTableHTML } from './ratings.js';
 import { SimPool } from './simpool.js';
 
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -75,7 +76,7 @@ export class SeasonUI {
       };
       return;
     }
-    const tabs = [['overview', 'Standings & schedule'], ['leaders', 'Leaders'], ['stats', 'Stats'], ['teamstats', 'Team stats'], ['injuries', 'Injuries'], ['history', 'History']];
+    const tabs = [['overview', 'Standings & schedule'], ['team', lg.userTeam ? 'My team' : 'Teams'], ['leaders', 'Leaders'], ['stats', 'Stats'], ['teamstats', 'Team stats'], ['injuries', 'Injuries'], ['history', 'History']];
     this.root.innerHTML = `
       <div class="se-head">
         <div class="se-title">${S.realSeason && S.year === 1 ? `${S.realSeason} NFL season` : `Season ${S.year}`} · ${S.phase === 'regular' ? `Week ${Math.min(S.week + 1, S.weeks.length)} of ${S.weeks.length}` : S.phase === 'playoffs' ? 'Playoffs' : 'Complete'}</div>
@@ -89,6 +90,7 @@ export class SeasonUI {
     else if (this.tab === 'stats') this.stats.renderPlayers(body);
     else if (this.tab === 'teamstats') this.stats.renderTeams(body);
     else if (this.tab === 'overview') this.renderOverview(body);
+    else if (this.tab === 'team') this.renderTeam(body);
     else if (this.tab === 'leaders') this.renderLeaders(body);
     else if (this.tab === 'injuries') this.renderInjuries(body);
     else this.renderHistory(body);
@@ -180,6 +182,52 @@ export class SeasonUI {
     body.querySelectorAll('[data-src]').forEach((b) => { b.onclick = () => { this.leaderSrc = b.dataset.src; this.render(); }; });
     const cb = body.querySelector('#se-cmp'); if (cb) cb.onchange = () => { this.compareReal = cb.checked; this.render(); };
     this.stats.bindLinks(body);
+  }
+
+  // Team ratings, starters, roster and coaching preferences, plus every team's ratings.
+  renderTeam(body) {
+    const lg = this.deps.getLeague();
+    if (!this.teamSel || !this.team(this.teamSel)) this.teamSel = lg.userTeam || lg.teams[0].id;
+    const t = this.team(this.teamSel);
+    const mine = t.id === lg.userTeam;
+    // in a fantasy league you coach your own franchise; otherwise any team can be adjusted (as in the Teams editor)
+    const editable = !lg.userTeam || mine;
+    const view = this.teamView || 'team';
+    body.innerHTML = `
+      <div class="st-bar">
+        <div class="pos-filter">${[['team', 'Team'], ['league', 'League ratings']].map(([k, l]) => `<button data-tview="${k}" class="${view === k ? 'on' : ''}">${l}</button>`).join('')}</div>
+        ${view === 'team' ? `<select id="tm-sel">${lg.teams.map((x) => `<option value="${esc(x.id)}" ${x.id === t.id ? 'selected' : ''}>${x.id === lg.userTeam ? '★ ' : ''}${esc(x.city)} ${esc(x.name)}</option>`).join('')}</select>` : ''}
+      </div>
+      ${view === 'league' ? leagueTableHTML(lg.teams, lg.userTeam, (id) => this.chip(id), this.openTeam) : `
+      <div class="box-top">
+        <div>
+          <div class="se-title">${this.chip(t.id)} ${esc(t.city)} ${esc(t.name)}</div>
+          ${teamRatingHTML(t)}
+          <h3 class="se-h3">Starters</h3>${lineupHTML(t)}
+        </div>
+        <div>
+          <h3 class="se-h3">Coaching${editable ? '' : ' (view only)'}</h3>
+          ${editable ? `<p class="dr-note" style="margin-top:0">Changes apply from the next game you watch or simulate.</p>` : '<p class="dr-note" style="margin-top:0">You coach your own franchise; other teams are run by the AI.</p>'}
+          ${coachPanelHTML(t.coach, { editable })}
+        </div>
+      </div>
+      <h3 class="se-h3">Roster</h3>${rosterHTML(t)}`}`;
+    const find = (pid) => { for (const x of lg.teams) { const p = x.roster.find((q) => q.id === pid); if (p) return { p, team: x }; } return null; };
+    body.querySelectorAll('[data-card]').forEach((el) => el.addEventListener('click', (e) => {
+      e.preventDefault();
+      const hit = find(el.dataset.card);
+      if (!hit) return;
+      showPlayerCard(hit.p, {
+        team: hit.team,
+        footer: '<div class="actions" style="justify-content:flex-start;margin-bottom:0"><button data-stats>Season stats &amp; game log</button></div>',
+        onOpen: (card, close) => { card.querySelector('[data-stats]').onclick = () => { close(); this.openPlayer(hit.p.id); }; },
+      });
+    }));
+    body.querySelectorAll('[data-tview]').forEach((b) => { b.onclick = () => { this.teamView = b.dataset.tview; this.render(); }; });
+    body.querySelectorAll('[data-lgteam]').forEach((tr) => { tr.onclick = () => { this.openTeam = this.openTeam === tr.dataset.lgteam ? null : tr.dataset.lgteam; this.render(); }; });
+    const sel = body.querySelector('#tm-sel');
+    if (sel) sel.onchange = () => { this.teamSel = sel.value; this.render(); };
+    if (editable && view === 'team') bindCoachPanel(body, t.coach, () => saveLeague(lg));
   }
 
   renderInjuries(body) {

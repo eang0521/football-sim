@@ -260,6 +260,10 @@ function freeRushers(sim, qb, radius) {
   return { pressure, nearest, nd, ttc };
 }
 
+// How hard a QB looks past open checkdowns for a throw that reaches the sticks on 3rd down.
+// Real QBs often take what's there on 3rd and long (NFL: ~20% of 3rd & 10+ get converted).
+const STICKS_PULL = 0.15;
+
 function qbPass(sim, qb) {
   const P = sim.pass;
   const los = sim.los;
@@ -353,7 +357,7 @@ function qbPass(sim, qb) {
     const waiting = ev && ev.notReady;
     if (waiting) ev = null;
     let thr = (P.drop === 'quick' ? 0.24 : 0.46) + style - timeSet * 0.1 - pressure * 0.25 - favor(sim, r);
-    if (ev && sim.ctx?.down >= 3 && ev.c.x < toGoX - 0.3 && P.ri < prog.length - 1) thr += 0.3;
+    if (ev && sim.ctx?.down >= 3 && ev.c.x < toGoX - 0.3 && P.ri < prog.length - 1) thr += 0.3 * STICKS_PULL;
     if (ev && ev.c.x - sim.los > 18) thr += (sim.cfg.weather?.windMph ?? 0) * 0.01 + (0.5 + (ev.c.x - sim.los - 18) * 0.03) * (hasTrait(qb.p, 'gunslinger') ? 0.6 : hasTrait(qb.p, 'game_manager') ? 1.4 : 1);
     if (ev && ev.score + noise() > thr) { P.path = 'read'; return startThrow(sim, qb, ev); }
     // hold on a primary read that hasn't broken yet (up to a point)
@@ -374,7 +378,7 @@ function qbPass(sim, qb) {
       let val = ev.score + noise() * panic + Math.min(air, 15) * 0.03 - Math.max(0, air - 18) * 0.05 + favor(sim, r);
       if (underDuress && !late && r !== P.look && r.fpos !== 'RB' && !['check', 'flat', 'swing'].includes(r.d.route?.name)) val -= 0.22;
       // on 3rd/4th down a throw that reaches the marker is worth more than a safe checkdown
-      if (sim.ctx?.down >= 3) val += ev.c.x >= toGoX - 0.5 ? (mustConvert(sim) ? 0.4 : 0.22) : -0.12;
+      if (sim.ctx?.down >= 3) val += mustConvert(sim) ? (ev.c.x >= toGoX - 0.5 ? 0.4 : -0.12) : (ev.c.x >= toGoX - 0.5 ? 0.22 : -0.12) * STICKS_PULL;
       if (!best || val > best.val) best = { ...ev, val };
     }
     const need = underDuress ? 0.32 : 0.15 - (timeSet - 1.5) * 0.07;
