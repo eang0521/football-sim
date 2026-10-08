@@ -1,6 +1,6 @@
 // Special teams: kickoffs, punts, field goals and extra points.
 // Frame: kicking team is 'O' and kicks toward +x.
-import { FIELD_W, MID_Y, GRAVITY } from './constants.js';
+import { FIELD_W, MID_Y, GRAVITY, yardLine, yardsBetween } from './constants.js';
 import { Picker, makeAgent, buildRoute } from './setup.js';
 import { clamp, norm } from '../util/vec.js';
 import { runnerThink, pursue, escortBlock, goTo, attackDir, evaluateTarget } from './ai.js';
@@ -322,7 +322,7 @@ function kickResult(outcome, spotX) {
     tacklers: (st.tacklers || []).map((a) => a.p),
   };
   const k = st.kicker;
-  const kdist = Math.round((st.land?.x ?? spotX) - sim.los);
+  const kdist = yardsBetween(sim.los, st.land?.x ?? spotX);
   const ret = sim.kr;
   const nm = (a) => shortName(a?.p);
   res.events.push({ type: 'kick', pid: k.p.id, ko: 1, tb: outcome === 'touchback' ? 1 : 0 });
@@ -345,7 +345,7 @@ function kickResult(outcome, spotX) {
     res.desc = `${nm(k)} kicks out of bounds. Ball placed at the 40.`;
     return res;
   }
-  const retYds = Math.round((st.catchX ?? spotX) - spotX);
+  const retYds = yardsBetween(spotX, st.catchX ?? spotX);
   res.events.push({ type: 'ret', pid: ret.p.id, kr: 1, yds: retYds, td: outcome === 'td' ? 1 : 0 });
   res.desc = `${nm(k)} ${sim.st.kickType === 'squib' ? 'squibs it' : 'kicks'} ${kdist} yards, ${nm(ret)} returns ${retYds} yards`;
   if (outcome === 'td') { res.td = 'D'; res.spotX = 0; res.desc += ' for a TOUCHDOWN!'; return res; }
@@ -578,7 +578,7 @@ function puntResult(outcome, spotX) {
     }
     return res;
   }
-  let gross = Math.round((outcome === 'touchback' ? 100 : (st.catchX ?? spotX)) - sim.los);
+  let gross = yardsBetween(sim.los, outcome === 'touchback' ? 100 : (st.catchX ?? spotX));
   if (outcome === 'touchback') {
     res.touchback = true; res.spotX = 80;
     res.events.push({ type: 'punt', pid: P.p.id, punts: 1, yds: gross, tb: 1 });
@@ -586,7 +586,7 @@ function puntResult(outcome, spotX) {
     return res;
   }
   if (outcome === 'downed' || (outcome === 'oob' && !st.catchX)) {
-    gross = Math.round(spotX - sim.los);
+    gross = yardsBetween(sim.los, spotX);
     res.events.push({ type: 'punt', pid: P.p.id, punts: 1, yds: gross, in20: spotX >= 80 ? 1 : 0 });
     res.desc = `${nm(P)} punts ${gross} yards, ${outcome === 'oob' ? 'out of bounds' : 'downed'}.`;
     return res;
@@ -598,7 +598,7 @@ function puntResult(outcome, spotX) {
     res.events.push({ type: 'ret', pid: ret.p.id, pr: 1, yds: 0, fc: 1 });
     return res;
   }
-  const retYds = Math.round((st.catchX ?? spotX) - spotX);
+  const retYds = yardsBetween(spotX, st.catchX ?? spotX);
   res.events.push({ type: 'ret', pid: ret.p.id, pr: 1, yds: retYds, td: outcome === 'td' ? 1 : 0 });
   res.desc = `${nm(P)} punts ${gross} yards, ${nm(ret)} returns ${retYds} yards`;
   if (outcome === 'td') { res.td = 'D'; res.spotX = 0; res.desc += ' for a TOUCHDOWN!'; return res; }
@@ -628,8 +628,8 @@ function fakePassResult(sim, res, outcome, spotX, thrower, head) {
   const w = st.fakeTarget;
   const nmA = (x) => shortName(x?.p);
   if (st.catcher) {
-    let yds = Math.round((spotX ?? sim.los) - sim.los);
-    if (outcome === 'td') { res.td = 'O'; yds = Math.round(100 - sim.los); res.spotX = 100; res.clockStops = true; }
+    let yds = yardsBetween(sim.los, spotX ?? sim.los);
+    if (outcome === 'td') { res.td = 'O'; yds = yardsBetween(sim.los, 100); res.spotX = 100; res.clockStops = true; }
     else res.spotX = spotX;
     res.events.push({ type: 'pass', pid: thrower.p.id, att: 1, cmp: 1, yds, td: res.td ? 1 : 0 });
     res.events.push({ type: 'rec', pid: st.catcher.p.id, tgt: 1, rec: 1, yds, td: res.td ? 1 : 0, long: yds });
@@ -650,11 +650,6 @@ function fakePassResult(sim, res, outcome, spotX, thrower, head) {
     res.desc = `${head} ${nmA(thrower)}'s pass for ${nmA(w)} falls incomplete.`;
   }
   return res;
-}
-
-function yardLine(ballOn) {
-  const b = Math.round(ballOn);
-  return b <= 50 ? `own ${b}` : `opp ${100 - b}`;
 }
 
 // ---------------- Field goal / PAT ----------------
@@ -690,7 +685,7 @@ function setupFG(sim, cfg) {
     wing.d.route = buildRoute(wing, 'arrow', Math.sign(wing.y - ballY) || 1, los);
     sim.st.fakeTarget = wing;
   }
-  const dist = Math.round(100 - los + 17);
+  const dist = 117 - yardLine(los);
   sim.st.fgDist = dist;
   sim.onSnap = () => {
     sim.throwBall(sim.snapper, hA, { c: { x: hA.x, y: hA.y }, T: 0.45, snap: true });

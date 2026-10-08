@@ -1,6 +1,6 @@
 import { startRecording, recordFrame } from './replay.js';
 // Core per-play simulation: agents, physics, blocking, ball flight, catches, tackles.
-import { DT, FIELD_W, MID_Y, GRAVITY, PLAYER_R, ENGAGE_R, TACKLE_R, MAX_PLAY_TIME } from './constants.js';
+import { DT, FIELD_W, MID_Y, GRAVITY, PLAYER_R, ENGAGE_R, TACKLE_R, MAX_PLAY_TIME, yardsBetween } from './constants.js';
 import { clamp, norm, angleDiff } from '../util/vec.js';
 import { setupScrimmage, setAgentContext } from './setup.js';
 import { hasTrait } from '../data/traits.js';
@@ -271,7 +271,7 @@ export class PlaySim {
     if (this.phase === 'set') {
       this.phaseT += dt;
       if (this.motion && !this.motion.done) return this.stepMotion(dt);
-      if (this.phaseT > 0.9) this.snap();
+      if (this.phaseT > 0.9 && !this.holdSnap) this.snap(); // a user's play waits for them to snap it
       return;
     }
     if (this.phase === 'dead') return this.stepDead(dt);
@@ -812,9 +812,12 @@ export class PlaySim {
     // fumble
     const pocketQB = c.role === 'qb' && !c.d.runner;
     const pF = (0.0045 + (100 - c.r.car) / 100 * 0.022) * (pocketQB ? 2.6 : 1) * (helpers ? 1.3 : 1) * (hasTrait(o.p, 'hard_hitter') ? 1.5 : 1) * (this.cfg.weather?.fumbleK ?? 1);
-    if (!this.st.kneel && this.rng.chance(pF) && !((spot >= 100 && c.side === 'O') || (spot <= 0 && c.side === 'D'))) {
+    // falling forward across the goal line: the ball broke the plane before he was down
+    const scores = c.d.runner && ((spot >= 100 && c.side === 'O') || (spot <= 0 && c.side === 'D'));
+    if (!this.st.kneel && this.rng.chance(pF) && !scores) {
       return this.fumble(c, o, spot);
     }
+    if (scores) return this.whistle('td', spot);
     this.whistle('tackle', spot);
   }
 
@@ -955,7 +958,7 @@ function buildScrimmageResult(sim, outcome, spotX) {
     if (st.int) {
       res.turnover = true;
       res.possession = 'D';
-      const retYds = Math.round(st.intX - (res.spotX));
+      const retYds = yardsBetween(res.spotX, st.intX);
       ev('pass', qb, { att: 1, int: 1 });
       if (tgt) ev('rec', tgt, { tgt: 1 });
       ev('def', st.int.p, { int: 1, intYds: retYds });
@@ -977,10 +980,16 @@ function buildScrimmageResult(sim, outcome, spotX) {
         (st.pbu ? ` (defended by ${nm(st.pbu)})` : st.drop ? ' (dropped)' : '') + '.';
       return res;
     }
-    // completion
-    const catcher = st.catcher;
-    yds = Math.round(res.spotX - los);
-    if (outcome === 'td') { res.td = 'O'; yds = Math.round(100 - los); res.spotX = 100; }
+    // completion (whoever ended up with the ball, if the catch wasn't recorded)
+    const catcher = st.catcher || (sim.ball.holder?.side === 'O' ? sim.ball.holder : null);
+    if (!catcher) {
+      ev('pass', qb, { att: 1 });
+      res.outcome = 'incomplete'; res.spotX = los; res.clockStops = true;
+      res.desc = `${nm(st.passer)} pass incomplete.`;
+      return res;
+    }
+    yds = yardsBetween(los, res.spotX);
+    if (outcome === 'td') { res.td = 'O'; yds = yardsBetween(los, 100); res.spotX = 100; }
     ev('pass', qb, { att: 1, cmp: 1, yds, td: res.td ? 1 : 0 });
     ev('rec', catcher.p, { tgt: catcher === st.target ? 1 : 1, rec: 1, yds, td: res.td ? 1 : 0, long: yds });
     res.desc = `${nm(st.passer)} pass ${Math.round(st.catchX - los) > 15 ? 'deep' : 'short'} ${dirWord(catcher.y)} to ${nm(catcher)} for ${yds === 0 ? 'no gain' : `${yds} yard${Math.abs(yds) === 1 ? '' : 's'}`}`;
@@ -994,8 +1003,8 @@ function buildScrimmageResult(sim, outcome, spotX) {
     // run, scramble or sack
     const carrier = st.rusher || (sim.runner) || sim.qb();
     const isQB = carrier === sim.qb();
-    yds = Math.round(res.spotX - los);
-    if (outcome === 'td') { res.td = 'O'; yds = Math.round(100 - los); res.spotX = 100; }
+    yds = yardsBetween(los, res.spotX);
+    if (outcome === 'td') { res.td = 'O'; yds = yardsBetween(los, 100); res.spotX = 100; }
     // NFL scoring: on a pass play, a QB downed at or behind the line without throwing is sacked,
     // even after scrambling, unless he crossed the line of scrimmage first.
     if (isQB && !sim.isRun && outcome !== 'td' && !st.qbCrossedLos && res.spotX <= los) {

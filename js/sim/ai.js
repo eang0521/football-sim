@@ -946,11 +946,52 @@ function ballReact(sim, a) {
   a.faceTo = null;
 }
 
+// ---------------- User control (playable games) ----------------
+// sim.user = { agent, move: { x, y } } with move in frame coordinates (length 0..1).
+function userThink(sim, a) {
+  const m = sim.user.move;
+  const L = Math.hypot(m.x, m.y);
+  // a QB the user isn't steering keeps doing his dropback (sim.noThrow stops the AI throwing)
+  if (a.role === 'qb' && !a.d.runner && !sim.isRun && L < 0.1) return qbPass(sim, a);
+  if (L < 0.1) { goTo(a, a.x, a.y, 1); return; }
+  goTo(a, a.x + (m.x / L) * 5, a.y + (m.y / L) * 5, a.maxSpd * Math.min(1, L), false);
+  // a QB who takes off past the line of scrimmage is a runner (and can't throw any more)
+  if (a.role === 'qb' && !a.d.runner && sim.ball.holder === a && a.x > sim.los + 0.3) { a.d.scramble = true; sim.startRun(a); sim.note('scramble', a); }
+}
+
+// The user throws to receiver r: lead him the way the QB AI would, even if he isn't open.
+export function userThrow(sim, r) {
+  const qb = sim.qb(), P = sim.pass;
+  if (!P || !qb || !r || r.down || sim.phase !== 'live' || sim.ball.holder !== qb || P.thrown || P.throwing || qb.d.runner) return false;
+  let ev = evaluateTarget(sim, qb, r);
+  if (!ev || ev.notReady) {
+    let T = 0.5, c = { x: r.x, y: r.y }, v = 20, lob = false, d = 10;
+    for (let k = 0; k < 4; k++) {
+      c = predictRoutePos(r, T + 0.12);
+      d = Math.hypot(c.x - qb.x, c.y - qb.y);
+      lob = d > 26; v = throwSpeed(qb, d, lob); T = d / v;
+    }
+    c = { x: Math.min(c.x, 109.5), y: clamp(c.y, 0.5, FIELD_W - 0.5) };
+    ev = { score: 0, c, T, v, lob, d, r };
+  }
+  startThrow(sim, qb, ev);
+  return true;
+}
+
+// The user throws it away: out of bounds, no intentional grounding in this sim.
+export function userThrowAway(sim) {
+  const qb = sim.qb(), P = sim.pass;
+  if (!P || !qb || sim.phase !== 'live' || sim.ball.holder !== qb || P.thrown || P.throwing || qb.d.runner) return false;
+  throwAway(sim, qb);
+  return true;
+}
+
 // ---------------- Main dispatcher ----------------
 export function think(sim, a) {
   a.want = null; a.faceTo = null; a.spdMul = 1;
   if (a.down) return;
   if (a.special) return a.special(sim, a);
+  if (sim.user?.agent === a && sim.kind === 'scrimmage') return userThink(sim, a);
   if (sim.kind === 'kneel') {
     if (sim.cfg.intSafety && a.side === 'D' && sim.qb()) return pursue(sim, a, sim.qb());
     goTo(a, a.x, a.y, 1); return;

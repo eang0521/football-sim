@@ -4,6 +4,7 @@ import { drawField } from './fieldTexture.js';
 import { createPlayerMesh, animatePlayer } from './playerModel.js';
 
 const W = 53.33, MID = W / 2;
+const BASE_FOV = 38; // vertical field of view across the uncovered band of the screen
 // frame (offense-relative) -> world. dir = +1 if offense attacks +X.
 export function toWorld(x, y, dir) {
   const X = dir > 0 ? x : 100 - x, Y = dir > 0 ? y : W - y;
@@ -25,7 +26,7 @@ export class FieldRenderer {
     scene.background = new THREE.Color(0x0d1624);
     scene.fog = new THREE.Fog(0x0d1624, 160, 380);
 
-    this.camera = new THREE.PerspectiveCamera(38, 1, 0.5, 1000);
+    this.camera = new THREE.PerspectiveCamera(BASE_FOV, 1, 0.5, 1000);
     this.camera.position.set(0, 30, 60);
     this.controls = new OrbitControls(this.camera, canvas);
     this.controls.enabled = false;
@@ -78,7 +79,35 @@ export class FieldRenderer {
     const w = this.canvas.clientWidth || window.innerWidth, h = this.canvas.clientHeight || window.innerHeight;
     this.renderer.setSize(w, h, false);
     this.camera.aspect = w / h;
-    this.camera.updateProjectionMatrix();
+    this.viewKey = null; // re-fit to the uncovered area
+    this.fitView();
+  }
+
+  // The scorebug and control bar sit over the canvas. Shift the projection so the camera's aim point
+  // lands in the middle of the uncovered band between them, and widen the lens so that band shows
+  // what the whole screen would have.
+  fitView() {
+    const cam = this.camera;
+    const W = this.canvas.clientWidth || window.innerWidth, H = this.canvas.clientHeight || window.innerHeight;
+    const cr = this.canvas.getBoundingClientRect();
+    const edge = (id, side) => {
+      const el = document.getElementById(id);
+      if (!el || el.classList.contains('hidden') || !el.offsetParent) return null;
+      return el.getBoundingClientRect()[side] - cr.top;
+    };
+    const top = Math.max(0, edge('scorebug', 'bottom') ?? 0);
+    const bot = Math.min(H, edge('controls', 'top') ?? H);
+    const key = `${W}x${H}:${Math.round(top)}:${Math.round(bot)}`;
+    if (key === this.viewKey) return;
+    this.viewKey = key;
+    const safe = Math.max(H * 0.5, bot - top);
+    const shift = Math.max(0, H / 2 - (top + bot) / 2); // how far above the screen center the band's center is
+    const tanHalf = Math.tan(THREE.MathUtils.degToRad(BASE_FOV / 2)) * (H / safe);
+    const full = H + 2 * shift;
+    cam.fov = THREE.MathUtils.radToDeg(2 * Math.atan(tanHalf * full / H));
+    if (shift > 1) cam.setViewOffset(W, full, 0, 2 * shift, W, H); // also sets the aspect to W / full
+    else { cam.clearViewOffset(); cam.aspect = W / H; }
+    cam.updateProjectionMatrix();
   }
 
   buildStadium() {
@@ -372,6 +401,7 @@ export class FieldRenderer {
 
     // penalty flags on the turf where the foul happened
     this.updateFlags(sim, dir);
+    this.updateUserMarks(sim, dir);
 
     // fade play art after the snap
     if (this.art.children.length) {
@@ -408,6 +438,39 @@ export class FieldRenderer {
       m.position.set(w.x, 0.04, w.z);
       m.rotation.y = i * 1.3;
     });
+  }
+
+  // Playable games: v = { agentId (the player the user controls), badges: Map(agentId -> key) } or null
+  setUserView(v) { this.userView = v; }
+
+  updateUserMarks(sim, dir) {
+    const v = this.userView;
+    if (!this.userRing) {
+      this.userRing = new THREE.Mesh(new THREE.RingGeometry(0.75, 1.0, 40),
+        new THREE.MeshBasicMaterial({ color: 0xffcc33, transparent: true, opacity: 0.9, side: THREE.DoubleSide, depthWrite: false }));
+      this.userRing.rotation.x = -Math.PI / 2;
+      this.scene.add(this.userRing);
+      this.keyEls = new Map();
+    }
+    const me = v?.agentId != null && sim.agents.find((a) => a.id === v.agentId);
+    this.userRing.visible = !!me;
+    if (me) { const w = toWorld(me.x, me.y, dir); this.userRing.position.set(w.x, 0.05, w.z); }
+    const W = this.canvas.clientWidth, H = this.canvas.clientHeight;
+    const shown = new Set();
+    for (const [id, key] of v?.badges || []) {
+      const m = this.players.get(id);
+      if (!m || !m.visible) continue;
+      let el = this.keyEls.get(id);
+      if (!el) { el = document.createElement('div'); el.className = 'pkey'; document.getElementById('labels').appendChild(el); this.keyEls.set(id, el); }
+      const p = new THREE.Vector3(m.position.x, 3.1, m.position.z).project(this.camera);
+      if (p.z > 1) continue;
+      shown.add(id);
+      el.textContent = key;
+      el.classList.toggle('me', id === v.agentId);
+      el.style.display = 'block';
+      el.style.transform = `translate(${(p.x * 0.5 + 0.5) * W}px, ${(-p.y * 0.5 + 0.5) * H}px) translate(-50%, -100%)`;
+    }
+    for (const [id, el] of this.keyEls) if (!shown.has(id)) el.style.display = 'none';
   }
 
   updateLabel(a, m) {
@@ -447,6 +510,7 @@ export class FieldRenderer {
   }
 
   updateCamera(sim, dt) {
+    this.fitView(); // the control bar can change height (wrapping, mobile)
     const dir = sim.meta.dir;
     const d = dir > 0 ? 1 : -1;
     const ff = this.focusFrame(sim);
@@ -459,11 +523,14 @@ export class FieldRenderer {
     const pos = new THREE.Vector3(), look = new THREE.Vector3();
     switch (this.camMode) {
       case 'broadcast': pos.set(fx, 20, fz * 0.3 + 46); look.set(fx, 0, fz * 0.55 - 2); break;
-      case 'high': pos.set(fx - d * 30, 36, fz * 0.3); look.set(fx + d * 10, 0, fz * 0.5); break;
+      // High behind the offense, aimed just past the action so the backfield stays clear of the
+      // control bar and the deepest routes stay on screen.
+      case 'high': pos.set(fx - d * 34, 36, fz * 0.3); look.set(fx - d * 4, 0, fz * 0.5); break;
       case 'endzone': {
+        // behind the QB, anchored on the line of scrimmage until someone breaks into the open
         const lx = toWorld(sim.los, MID, dir).x;
         const bx = sim.phase === 'lineup' || sim.phase === 'set' || !(holder && holder.d.runner) ? lx : fx;
-        pos.set(bx - d * 16, 7.5, fz * 0.4); look.set(bx + d * 14, 1, fz * 0.6);
+        pos.set(bx - d * 24, 12, fz * 0.4); look.set(bx, 0, fz * 0.6);
         break;
       }
       case 'follow': pos.set(fx - d * 11, 6, fz + 7); look.set(fx + d * 5, 1, fz); break;

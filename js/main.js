@@ -8,6 +8,7 @@ import { SeasonUI } from './ui/seasonui.js';
 import { DraftUI } from './ui/draftui.js';
 import { DT } from './sim/constants.js';
 import { ReplaySim } from './sim/replay.js';
+import { PlayMode } from './ui/playmode.js';
 
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -17,6 +18,7 @@ saveLeague(league);
 
 const renderer = new FieldRenderer($('view'));
 const hud = new Hud();
+const playMode = new PlayMode({ renderer, panel: $('playcall'), hint: $('play-hint') });
 const editor = new TeamEditor($('teams-body'), () => league, (lg) => { league = lg; }, () => fillTeamSelects());
 
 const S = {
@@ -25,12 +27,13 @@ const S = {
 };
 
 // ---------------- Game flow ----------------
-function startGame(home, away, opts) {
+function startGame(home, away, opts, user = null) {
   S.onFinal = null; // exhibition game: nothing to report back
-  attachGame(new Game(home, away, opts));
+  attachGame(new Game(home, away, opts), user);
 }
 
-function attachGame(game) {
+// user: 'home' | 'away' to call the plays and control a player for that team
+function attachGame(game, user = null) {
   const home = game.teams.home, away = game.teams.away;
   S.game = game;
   game.recording = true; // keep frames for instant replay and highlights
@@ -42,14 +45,32 @@ function attachGame(game) {
   hud.reset(S.game);
   hud.showWP(S.game);
   setPaused(false);
+  S.calling = false;
+  if (user) {
+    playMode.start(game, user);
+    if (renderer.camMode === 'broadcast') setCam('endzone');
+  } else playMode.stop();
   window.__game = S.game; // handy for debugging in the console
 }
 
 function beginNextPlay() {
   const g = S.game;
-  const sim = g.nextSim();
+  if (S.calling) return null;
+  let opts = {};
+  if (playMode.active && !S.call) {
+    // the user's team is on the field: wait for the play call
+    const asked = playMode.callNext();
+    if (asked) {
+      S.calling = true;
+      asked.then((choice) => { S.calling = false; S.call = { user: choice }; });
+      return null;
+    }
+  }
+  if (S.call) { opts = S.call; S.call = null; }
+  const sim = g.nextSim(opts);
   if (!sim) { onGameOver(); return null; }
   S.sim = sim;
+  playMode.attach(sim);
   S.clockFrom = g.s.quarter === S.lastQ ? S.lastShown : null;
   S.lastQ = g.s.quarter;
   renderer.updateOverlays(sim, g);
@@ -92,6 +113,7 @@ function displayClock() {
 
 function tickSim() {
   if (!S.game || S.game.s.final && !S.sim) return;
+  if (S.calling) return;
   if (!S.sim) { if (!beginNextPlay()) return; }
   const sim = S.sim;
   if (S.waiting) return;
@@ -105,8 +127,10 @@ function tickSim() {
 
 function nextPlay() {
   if (!S.game || S.bulk) return;
+  if (S.calling) return;
   if (S.sim && !S.sim.applied) {
-    // fast-forward the current play
+    // fast-forward the current play (the AI takes over the user's player)
+    playMode.release(S.sim);
     S.sim.runToEnd();
     finishPlay(S.sim);
     S.sim.deadT = 1.2; // brief pause to show the result
@@ -125,7 +149,8 @@ async function bulkSim(mode) {
   const untilQuarterEnd = mode === 'quarter';
   const late = () => mode === 'late' && g.s.quarter >= 4 && g.s.clock <= 300;
   if (late()) { hud.toast('Already inside the last five minutes.'); return; }
-  if (S.sim && !S.sim.applied) { S.sim.runToEnd(); finishPlay(S.sim); }
+  if (S.calling) { playMode.hidePanel(); S.calling = false; S.call = null; } // the coaches take it from here
+  if (S.sim && !S.sim.applied) { playMode.release(S.sim); S.sim.runToEnd(); finishPlay(S.sim); }
   S.sim = null; S.waiting = false;
   S.bulk = true;
   setBusy(true);
@@ -185,6 +210,8 @@ function frame(now) {
     return;
   }
   if (S.game && !S.paused && !S.bulk) {
+    if (S.sim?.user) playMode.frame(S.sim, renderer.camera);
+    else if (playMode.active) playMode.setHint('');
     S.acc += dt * S.speed;
     let n = 0;
     while (S.acc >= DT && n++ < 40) { tickSim(); S.acc -= DT; }
@@ -196,7 +223,8 @@ function frame(now) {
 requestAnimationFrame(frame);
 // Debug hooks (console): advance the sim n ticks and render once.
 window.__S = S;
-window.__advance = (n = 60) => { for (let i = 0; i < n; i++) tickSim(); renderer.update(S.sim, S.game, 1 / 60, performance.now()); hud.update(displayClock()); return S.sim && { phase: S.sim.phase, t: +S.sim.t.toFixed(2) }; };
+window.__playMode = playMode;
+window.__advance = (n = 60) => { for (let i = 0; i < n; i++) { if (S.sim?.user) playMode.frame(S.sim, renderer.camera); tickSim(); } renderer.update(S.sim, S.game, 1 / 60, performance.now()); hud.update(displayClock()); return S.sim && { phase: S.sim.phase, t: +S.sim.t.toFixed(2) }; };
 
 // ---------------- Replays ----------------
 function playReplays(list, title) {
@@ -248,6 +276,7 @@ function setCam(mode) {
 }
 window.addEventListener('keydown', (e) => {
   if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
+  if (!document.querySelector('.modal:not(.hidden)') && !S.paused && !S.replay && playMode.keyDown(e, S.sim)) { e.preventDefault(); return; }
   if (!document.querySelector('.modal:not(.hidden)')) {
     if (e.code === 'Space') { e.preventDefault(); setPaused(!S.paused); }
     if (e.key === 'n' || e.key === 'N') { if (S.replay) endReplay(); else nextPlay(); }
@@ -257,6 +286,8 @@ window.addEventListener('keydown', (e) => {
   }
   if (e.key === 'Escape') document.querySelectorAll('.modal').forEach((m) => m.classList.add('hidden'));
 });
+window.addEventListener('keyup', (e) => playMode.keyUp(e));
+window.addEventListener('blur', () => playMode.keys.clear());
 
 // ---------------- Modals ----------------
 function openModal(id) { $(id).classList.remove('hidden'); }
@@ -274,9 +305,9 @@ $('btn-teams').addEventListener('click', () => { editor.render(); openModal('mod
 const seasonUI = new SeasonUI($('season-body'), {
   getLeague: () => league,
   toast: (m) => hud.toast(m, 4000),
-  watch: (game, onDone) => {
+  watch: (game, onDone, user) => {
     closeModal('modal-season');
-    attachGame(game);
+    attachGame(game, user);
     S.onFinal = onDone; // record the result when the final whistle blows
     hud.toast(`Season ${seasonUI.season.year}: ${game.teams.away.abbr} @ ${game.teams.home.abbr}`);
   },
@@ -325,6 +356,10 @@ function fillTeamSelects() {
 function updateCards() {
   $('ng-away-card').innerHTML = teamCard(league.teams[+$('ng-away').value]);
   $('ng-home-card').innerHTML = teamCard(league.teams[+$('ng-home').value]);
+  const u = $('ng-user'), v = u.value;
+  u.options[1].textContent = `${league.teams[+$('ng-away').value].name} (away)`;
+  u.options[2].textContent = `${league.teams[+$('ng-home').value].name} (home)`;
+  u.value = v;
 }
 $('ng-away').addEventListener('change', updateCards);
 $('ng-home').addEventListener('change', updateCards);
@@ -339,7 +374,7 @@ $('ng-start').addEventListener('click', () => {
     seed: seedV === '' ? undefined : +seedV,
     // imported leagues: players currently out (IR, out, doubtful, suspended) sit this one out
     out: new Set([league.teams[hi], league.teams[ai]].flatMap((t) => t.roster.filter((p) => ['IR', 'Out', 'Doubtful', 'Suspended'].includes(p.injury?.status)).map((p) => p.id))),
-  });
+  }, $('ng-user').value || null);
 });
 
 if (window.innerWidth < 1100) $('pbp').classList.add('collapsed');

@@ -90,6 +90,8 @@
     </nav>
 
     <div id="toast" class="hidden"></div>
+    <div id="playcall" class="hidden"></div>
+    <div id="play-hint" class="hidden"></div>
   </div>
 
   <!-- New game -->
@@ -126,6 +128,13 @@
             <option value="snow">Snow</option>
             <option value="wind">Windy</option>
             <option value="cold">Cold</option>
+          </select>
+        </label>
+        <label>You control
+          <select id="ng-user">
+            <option value="">Nobody (watch)</option>
+            <option value="away">Away team</option>
+            <option value="home">Home team</option>
           </select>
         </label>
         <label>Seed <input id="ng-seed" type="number" placeholder="random" /></label>

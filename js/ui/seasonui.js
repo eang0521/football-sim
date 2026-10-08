@@ -13,7 +13,7 @@ const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&l
 export class SeasonUI {
   constructor(root, deps) {
     this.root = root;
-    this.deps = deps; // { getLeague, watch(game, onDone), toast(msg) }
+    this.deps = deps; // { getLeague, watch(game, onDone, user), toast(msg) }
     this.key = seasonKey(deps.getLeague());
     this.season = loadSeason(this.key);
     this.tab = 'overview';
@@ -127,7 +127,7 @@ export class SeasonUI {
       const byes = S.phase === 'regular' ? S.teams.filter((id) => !playing.has(id)) : [];
       slate = `<h3 class="se-h3">${label}</h3>${byes.length ? `<div style="color:var(--muted);font-size:12px;margin:-2px 0 6px">Bye: ${byes.map((id) => this.chip(id)).join(' ')}</div>` : ''}
         <div class="se-games">${games.map((g, i) => `<div class="se-game${isMine(g) ? ' mine' : ''}"><span>${isMine(g) ? '<span class="my-label">Your game</span> ' : ''}${this.chip(g.away)}${seed(g.away)} @ ${this.chip(g.home)}${seed(g.home)}${g.playoff && /^[A-Z]{3} /.test(g.playoff) ? ` <span style="color:var(--muted)">${esc(g.playoff.slice(0, 3))}</span>` : ''}</span>
-          <span><button data-watch="${i}">Watch</button> <button data-sim="${i}">Sim</button></span></div>`).join('')}</div>
+          <span>${isMine(g) ? `<button data-play="${i}" class="primary" title="Call the plays and control your players">Play</button> ` : ''}<button data-watch="${i}">Watch</button> <button data-sim="${i}">Sim</button></span></div>`).join('')}</div>
         ${this.lastResults()}
         <div class="actions" style="justify-content:flex-start">
           ${games.some(isMine) && games.length > 1 ? '<button id="se-simothers" title="Simulate every game except yours, then watch yours">Sim other games</button>' : ''}
@@ -140,6 +140,7 @@ export class SeasonUI {
     body.innerHTML = `<div class="box-top"><div>${table}</div><div>${slate}</div></div>`;
     const q = (sel) => body.querySelector(sel);
     body.querySelectorAll('[data-watch]').forEach((b) => { b.onclick = () => this.watch(games[+b.dataset.watch]); });
+    body.querySelectorAll('[data-play]').forEach((b) => { b.onclick = () => { const g = games[+b.dataset.play]; this.watch(g, g.home === me ? 'home' : 'away'); }; });
     body.querySelectorAll('[data-sim]').forEach((b) => { b.onclick = () => this.simGames([games[+b.dataset.sim]]); });
     q('#se-simweek') && (q('#se-simweek').onclick = () => this.simGames(currentGames(this.season)));
     q('#se-simothers') && (q('#se-simothers').onclick = () => this.simGames(currentGames(this.season).filter((g) => !isMine(g))));
@@ -245,10 +246,11 @@ export class SeasonUI {
   }
 
   // ---------- actions ----------
-  watch(g) {
+  // user: 'home' | 'away' to play the game instead of watching it
+  watch(g, user = null) {
     const lg = this.deps.getLeague();
     const game = createSeasonGame(this.season, lg, g);
-    this.deps.watch(game, () => this.finished(g, game));
+    this.deps.watch(game, () => this.finished(g, game), user);
   }
 
   finished(g, game) {

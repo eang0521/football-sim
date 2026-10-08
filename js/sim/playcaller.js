@@ -52,11 +52,12 @@ function choosePersonnel(coach, ctx, rng, goalLine) {
 }
 
 // adapt (optional): in-game learning { passAdj, concept: { id: multiplier }, scout: { formation: { run, pass } } }
-// opts: { formation, kind } to force a look (audibles keep the formation the offense lined up in)
+// opts: { formation, kind } to force a look (audibles keep the formation the offense lined up in);
+// { formation, playId, runDir } to run a specific play (the user's call in a playable game)
 export function callOffense(team, ctx, rng, adapt, opts = {}) {
   const coach = team.coach;
   const goalLine = ctx.ballOn >= 97 || (ctx.toGo <= 1 && ctx.down >= 3 && rng.chance(0.5));
-  if (ctx.hail) {
+  if (ctx.hail && !opts.playId) {
     const play = PASS_PLAYS.find((p) => p.hail);
     return { formation: rng.pick(play.forms), pers: '10', flip: rng.chance(0.5), play: { kind: 'pass', ...play }, name: play.name, motion: false };
   }
@@ -74,17 +75,18 @@ export function callOffense(team, ctx, rng, adapt, opts = {}) {
   const scN = sc ? sc.run + sc.pass : 0;
   const scout = scN >= 4 ? (sc.run / scN - 0.5) * 0.3 * Math.min(1, scN / 10) : 0;
   const pPass = clamp(passProbability(coach, ctx) + (adapt?.passAdj || 0) + PERS_PASS[F.personnel] + scout, 0.05, 0.97);
-  const kind = opts.kind || (rng.chance(pPass) ? 'pass' : 'run');
+  const forced = opts.playId && (PASS_PLAYS.find((p) => p.id === opts.playId) ? 'pass' : 'run');
+  const kind = forced || opts.kind || (rng.chance(pPass) ? 'pass' : 'run');
   const base = { formation, pers: F.personnel, flip: rng.chance(0.5), scout: Math.abs(scout) > 0.05 };
   if (kind === 'pass') {
-    const play = choosePass(coach, ctx, rng, adapt, formation, goalLine);
+    const play = forced ? PASS_PLAYS.find((p) => p.id === opts.playId) : choosePass(coach, ctx, rng, adapt, formation, goalLine);
     if (play) return { ...base, play: { kind: 'pass', ...play }, name: play.name, motion: !play.screen && rng.chance(0.4) };
   }
-  const run = chooseRun(team, ctx, rng, adapt, formation);
+  const run = (forced && RUN_PLAYS.find((r) => r.id === opts.playId)) || chooseRun(team, ctx, rng, adapt, formation);
   const flip = base.flip, f = flip ? -1 : 1;
   const yDy = F.slots.Y?.dy ?? -3.9;
   const strong = Math.sign(yDy) * f;
-  const runDir = rng.chance(0.62) ? strong : -strong;
+  const runDir = opts.runDir ?? (rng.chance(0.62) ? strong : -strong);
   return {
     ...base, flip, runDir, motion: run.scheme !== 'sneak' && rng.chance(0.25),
     play: { kind: 'run', ...run, carrierSlot: run.scheme === 'sneak' ? 'QB' : 'F' },
@@ -138,7 +140,8 @@ function chooseRun(team, ctx, rng, adapt, formation) {
 }
 
 // opp (optional): the offense's tendencies this game { passRate, runSR, passSR, n }
-export function callDefense(team, ctx, offCall, rng, opp) {
+// opts: { callId } to play a specific call (the front still matches the offense's personnel)
+export function callDefense(team, ctx, offCall, rng, opp, opts = {}) {
   const coach = team.coach;
   const pers = FORMATIONS[offCall.formation].personnel;
   const { down, toGo, ballOn } = ctx; // ballOn from offense perspective
@@ -179,7 +182,7 @@ export function callDefense(team, ctx, offCall, rng, opp) {
     if (front === 'goal' && (c.cov === 'C4' || c.cov === 'C2')) x *= 0.3;
     return x;
   };
-  const call = rng.weighted(DEF_CALLS, w);
+  const call = DEF_CALLS.find((c) => c.id === opts.callId) || rng.weighted(DEF_CALLS, w);
   const cov = COVERAGES[call.cov];
   // Disguise: show the opposite safety shell pre-snap and rotate at the snap
   let shownShell = cov.shell;

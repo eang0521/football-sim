@@ -366,3 +366,31 @@ b.r-elite, b.r-good, b.r-ok, b.r-low { font-weight: 700; }
 .cp-ends output { color: var(--text); font-weight: 600; }
 @media (max-width: 640px) { .rc-card { padding: 14px 12px; } }
 .tr-openslot { color: var(--muted); font-style: italic; }
+
+/* playable games: play-call panel, controls hint, key badges */
+#playcall { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); z-index: 30; width: min(980px, calc(100% - 24px)); max-height: calc(100% - 200px); overflow: auto;
+  background: var(--panel-solid); border: 1px solid var(--line); border-radius: 14px; padding: 14px 16px; box-shadow: 0 20px 60px rgba(0,0,0,.6); }
+#playcall.hidden, #play-hint.hidden { display: none; }
+.pc-head { font-size: 13px; color: var(--muted); margin-bottom: 10px; }
+.pc-head b { color: var(--accent); font: 800 18px var(--cond); letter-spacing: .04em; text-transform: uppercase; margin-right: 4px; }
+.pc-forms { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }
+.pc-forms button { padding: 5px 9px; font-size: 12px; }
+.pc-forms small { color: var(--muted); margin-left: 3px; }
+.pc-forms button.on small { color: #e8f2ff; }
+.pc-cols { display: grid; grid-template-columns: minmax(0, 3fr) minmax(0, 2fr); gap: 14px; }
+.pc-cols h4 { margin: 0 0 6px; font: 700 13px var(--cond); letter-spacing: .06em; text-transform: uppercase; color: var(--muted); }
+.pc-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
+.pc-grid button { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; text-align: left; padding: 7px 9px; }
+.pc-grid small { color: var(--muted); font-weight: 500; font-size: 11px; }
+.pc-runs { display: flex; flex-direction: column; gap: 4px; }
+.pc-runs div { display: grid; grid-template-columns: 1fr auto auto; gap: 4px; align-items: center; font-size: 13px; }
+.pc-runs button { padding: 5px 9px; font-size: 12px; }
+.pc-foot { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 12px; }
+.pc-foot span { color: var(--muted); font-size: 12px; margin-left: 6px; }
+#play-hint { position: absolute; left: 50%; bottom: 96px; transform: translateX(-50%); z-index: 6; background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+  padding: 5px 12px; font-size: 12.5px; color: var(--muted); white-space: nowrap; pointer-events: none; }
+#play-hint b { color: var(--text); }
+.pkey { position: absolute; left: 0; top: 0; min-width: 18px; padding: 1px 5px; border-radius: 5px; background: #0b111bcc; border: 1px solid var(--accent-2);
+  color: #fff; font: 800 13px var(--cond); text-align: center; pointer-events: none; }
+.pkey.me { background: var(--accent); color: #111; border-color: var(--accent); }
+@media (max-width: 640px) { .pc-cols { grid-template-columns: 1fr; } #play-hint { bottom: 150px; white-space: normal; width: calc(100% - 24px); text-align: center; } }

@@ -11,7 +11,7 @@ import { Stats } from './stats.js';
 import { depthChart, teamRatings } from '../data/teamgen.js';
 import { FOULS, rollPreSnap, enforce, stateValue, describeFoul } from './penalties.js';
 import { makeWeather, describeWeather, effectiveKickDist } from './weather.js';
-import { FIELD_W, MID_Y, HASH_L, HASH_R, QUARTER_LEN, OT_LEN } from './constants.js';
+import { FIELD_W, MID_Y, HASH_L, HASH_R, QUARTER_LEN, OT_LEN, yardLine, yardsBetween } from './constants.js';
 
 const other = (k) => (k === 'home' ? 'away' : 'home');
 const PLAY_CLOCK = 39;  // seconds a team milking the clock takes between snaps
@@ -142,6 +142,24 @@ export class Game {
   queueCalls(key, calls) { this.s.next = { poss: key, calls }; }
 
   // ---------- flow ----------
+  // Playable games: does the user (team key `user`) call the next snap? Returns null when the AI
+  // handles it (kicks, PATs, an AI offense punting or kicking), else { side: 'O' | 'D', ctx }.
+  // An AI offense's decision is made here and kept for nextSim, so the user isn't asked for a
+  // defensive call ahead of a punt.
+  prepareNext(user) {
+    this.checkQuarterEnd();
+    const s = this.s;
+    this.pending = null;
+    if (s.final || s.phase !== 'scrimmage') return null;
+    const off = s.poss;
+    const ctx = this.ctxFor(off);
+    if (off === user) return { side: 'O', ctx };
+    const decision = this.decide(off, ctx);
+    this.pending = { off, decision };
+    return decision === 'play' ? { side: 'D', ctx: { ...ctx, scoreDiff: -ctx.scoreDiff } } : null;
+  }
+
+  // opts.user: the user's call for this snap. { off: { formation, playId, runDir } | { decision }, def: { callId } }
   nextSim(opts = {}) {
     if (this.s.final) return null;
     this.checkQuarterEnd();
@@ -175,10 +193,15 @@ export class Game {
       const off = s.poss, def = other(off);
       const ctx = this.ctxFor(off);
       const defCtx = { ...ctx, scoreDiff: -ctx.scoreDiff, defPrevent: ctx.hail || (-ctx.scoreDiff > 3 && s.quarter >= 4 && s.clock < 150) };
-      const decision = this.decide(off, ctx);
+      const U = opts.user || {};
+      const planned = this.pending?.off === off ? this.pending.decision : null;
+      this.pending = null;
+      let decision;
+      if (U.off) { decision = U.off.decision || 'play'; s.next = null; } // the user calls it: nothing queued by the AI
+      else decision = planned ?? this.decide(off, ctx);
       const base = { offTeam: this.teams[off], defTeam: this.teams[def], los: s.ballOn, ballY: s.ballY };
       const aggr = this.teams[off].coach.aggression;
-      const fakeOK = s.toGo <= 3 && !(s.quarter >= 4 && ctx.scoreDiff > 0);
+      const fakeOK = !U.off && s.toGo <= 3 && !(s.quarter >= 4 && ctx.scoreDiff > 0);
       if (decision === 'punt') {
         const fake = fakeOK && s.ballOn >= 25 && s.ballOn <= 60 && rng.chance(aggr * 0.09);
         cfg = { ...base, kind: 'punt', fake };
@@ -186,7 +209,7 @@ export class Game {
       } else if (decision === 'fg') {
         const fake = fakeOK && s.clock > 30 && rng.chance(aggr * 0.05);
         cfg = { ...base, kind: 'fg', ballY: clamp(s.ballY, HASH_R, HASH_L), fake };
-        meta = { type: 'fg', off, def, label: `${Math.round(117 - s.ballOn)}-yd Field Goal`, fake };
+        meta = { type: 'fg', off, def, label: `${117 - yardLine(s.ballOn)}-yd Field Goal`, fake };
       } else {
         let offCall, kind = 'scrimmage';
         const special = decision === 'kneel' || decision === 'spike' || decision === 'safety';
@@ -195,9 +218,10 @@ export class Game {
           const nm = decision === 'spike' ? 'Spike' : decision === 'safety' ? 'Intentional Safety' : s.quarter >= 4 ? 'Victory Formation' : 'QB Kneel';
           offCall = { formation: decision === 'spike' ? 'gun_doubles' : 'singleback', flip: false, runDir: 1, name: nm,
             play: { kind: 'run', id: 'kneel', name: nm, scheme: 'sneak', aim: 0, carrierSlot: 'QB' } };
-        } else offCall = callOffense(this.teams[off], ctx, rng, this.adapt(off));
-        const defCall = callDefense(this.teams[def], defCtx, offCall, rng, this.oppTend(off));
-        if (!special) offCall = this.maybeAudible(off, ctx, offCall, defCall) || offCall;
+        } else if (U.off?.playId) offCall = callOffense(this.teams[off], ctx, rng, null, U.off);
+        else offCall = callOffense(this.teams[off], ctx, rng, this.adapt(off));
+        const defCall = callDefense(this.teams[def], defCtx, offCall, rng, this.oppTend(off), U.def || {});
+        if (!special && !U.off) offCall = this.maybeAudible(off, ctx, offCall, defCall) || offCall;
         const wantOOB = ctx.mode === 'hurry';
         const stayIn = ctx.mode === 'kill' || ctx.mode === 'milk' || ctx.mode === 'out';
         // leading late, where a first down lets the offense kneel out the clock: the runner goes down
@@ -585,7 +609,7 @@ export class Game {
         if (meta.type === 'scrimmage' || meta.type === 'kneel' || res.fake) {
           T0.plays++;
           const intercepted = res.events.some((e) => e.type === 'pass' && e.int);
-          const gain = res.td === 'O' ? Math.round(100 - s.ballOn) : res.td === 'D' || intercepted ? 0 : Math.round(res.spotX - s.ballOn);
+          const gain = res.td === 'O' ? yardsBetween(s.ballOn, 100) : res.td === 'D' || intercepted ? 0 : yardsBetween(s.ballOn, res.spotX);
           if (res.kind === 'pass') { T0.passAtt++; if (res.events.some((e) => e.type === 'pass' && e.cmp)) { T0.passCmp++; T0.passYds += gain; T0.totalYds += gain; } }
           else if (res.kind === 'sack') { T0.sacks++; T0.sackYds += -gain; T0.totalYds += gain; }
           else { T0.rushAtt++; T0.rushYds += gain; T0.totalYds += gain; }
@@ -650,9 +674,10 @@ export class Game {
     if (pen.post && !scored && !changed && s.phase === 'scrimmage' && s.poss === off) {
       const f = pen.post;
       const y = Math.min(15, (100 - s.ballOn) / 2);
+      const yl = yardsBetween(s.ballOn, s.ballOn + y);
       s.ballOn += y; s.down = 1; s.toGo = Math.min(10, 100 - s.ballOn);
-      this.countPenalty(def, y);
-      text += ` PENALTY: ${describeFoul(f, this.teams[def])}, ${Math.round(y)} yard${Math.round(y) === 1 ? '' : 's'}${y < 15 ? ' (half the distance)' : ''}, automatic first down.`;
+      this.countPenalty(def, yl);
+      text += ` PENALTY: ${describeFoul(f, this.teams[def])}, ${yl} yard${yl === 1 ? '' : 's'}${y < 15 ? ' (half the distance)' : ''}, automatic first down.`;
     } else if (pen.post) text += ` (${FOULS[pen.post.type].name} on ${this.teams[def].abbr} enforced on the kickoff.)`;
     this.updateMomentum(sim, { scored, changed });
     this.recordScoring(meta, text, nScoring, nDrives);
@@ -866,8 +891,13 @@ export class Game {
   }
 
   respot(res, spot, removeTD, makeTD) {
-    const d = Math.round(spot) - Math.round(res.td === 'O' ? 100 : res.spotX);
+    const d = yardsBetween(res.td === 'O' ? 100 : res.spotX, spot);
     res.spotX = spot;
+    // the stated gain moves with the spot ("for 3 yards" -> "for 2 yards")
+    res.desc = res.desc.replace(/for (-?\d+) yards?|for no gain/, (m, n) => {
+      const y = (n ? +n : 0) + d;
+      return y === 0 ? 'for no gain' : `for ${y} yard${Math.abs(y) === 1 ? '' : 's'}`;
+    });
     if (removeTD) { res.td = null; res.clockStops = false; res.desc = res.desc.replace(', TOUCHDOWN!', ', short of the goal line.'); }
     if (makeTD) { res.td = 'O'; res.clockStops = true; res.desc += ' TOUCHDOWN!'; }
     for (const e of res.events) {
@@ -927,8 +957,9 @@ export class Game {
       res.spotX = 100 - newR;
       const wasTD = !!res.td;
       res.td = null;
-      this.countPenalty(def, R - newR);
-      return { mode: 'kick', flag: true, suffix: `${wasTD ? 'TOUCHDOWN NULLIFIED. ' : ''}PENALTY: ${describeFoul(f, this.teams[def])}, ${yardsWord(y)} from the ${100 - f.x < basic ? 'spot of the foul' : duringKick ? 'end of the kick' : 'end of the return'}.` };
+      const yl = yardsBetween(newR, F);
+      this.countPenalty(def, yardsBetween(newR, R));
+      return { mode: 'kick', flag: true, suffix: `${wasTD ? 'TOUCHDOWN NULLIFIED. ' : ''}PENALTY: ${describeFoul(f, this.teams[def])}, ${yardsWord(yl)} from the ${100 - f.x < basic ? 'spot of the foul' : duringKick ? 'end of the kick' : 'end of the return'}.` };
     }
     if (meta.type !== 'scrimmage') return { mode: 'none' };
 

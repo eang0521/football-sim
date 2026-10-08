@@ -1,5 +1,6 @@
 // Penalty definitions, pre-snap rolls and NFL-style enforcement helpers.
 import { clamp } from '../util/vec.js';
+import { yardsBetween } from './constants.js';
 
 // side: which side of the snap commits it ('O' offense, 'D' defense, 'R' return team on kicks)
 // spot: enforced from the spot of the foul; auto1st: automatic first down; post: dead-ball / after-the-play foul
@@ -62,13 +63,13 @@ export function enforce(foul, pre, spotX) {
   if (offFoul) {
     const y = Math.min(def.yds, B / 2);
     st.halfDist = y < def.yds;
-    st.ballOn = B - y; st.moved = -y; st.toGo = pre.toGo + y;
+    st.ballOn = B - y; st.moved = yardsBetween(B, B - y); st.toGo = pre.toGo + y;
     return st;
   }
   let nb;
   if (def.spot) nb = clamp(Math.max(spotX ?? B + 1, B + 1), 0, 99);
   else { const y = Math.min(def.yds, (100 - B) / 2); st.halfDist = y < def.yds; nb = B + y; }
-  st.ballOn = nb; st.moved = nb - B;
+  st.ballOn = nb; st.moved = yardsBetween(B, nb);
   if (def.auto1st || nb >= B + pre.toGo) { st.down = 1; st.toGo = Math.min(10, 100 - nb); st.firstDown = true; }
   else st.toGo = pre.toGo - (nb - B);
   return st;

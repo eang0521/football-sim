@@ -11,6 +11,12 @@ export const MAX_PLAY_TIME = 16;
 export const QUARTER_LEN = 900;
 export const OT_LEN = 600;
 
+// Yardage is measured between yard lines: each spot is rounded to the nearest yard line first, and a
+// ball in the field of play is never on a goal line (a foot short of the goal line is the 1).
+// Down and distance keep the exact spot, so a 10-yard gain can still leave 2nd & inches.
+export const yardLine = (x) => (x > 0 && x < 100 ? Math.min(99, Math.max(1, Math.round(x))) : Math.round(x));
+export const yardsBetween = (from, to) => yardLine(to) - yardLine(from);
+
 // Physical capability from ratings
 export function physFromRatings(p) {
   const r = p.ratings;
